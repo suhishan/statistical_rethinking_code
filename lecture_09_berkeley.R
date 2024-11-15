@@ -120,3 +120,15 @@ p_G2 <- link(mGD, data = list(
 ))
 
 dens(p_G1 - p_G2)
+
+
+
+# tabulation for male and female admission rates by department ------------
+
+data.frame(d) %>% group_by(D) %>% 
+  mutate(
+    pg = N/sum(N)
+  ) %>% select(D,G,pg) %>% pivot_wider(names_from = D, values_from = pg) %>% 
+  round(digits = 2)
+postcheck(mG)
+pairs(mGD)
