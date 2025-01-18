@@ -21,4 +21,3 @@ cor(d$MedianAgeMarriage, d$Marriage)
 
 DMA_dag2 <- dagitty('dag{ D <- A -> M }')
 impliedConditionalIndependencies( DMA_dag2 )
-
