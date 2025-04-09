@@ -30,7 +30,7 @@ for (i in 1:N) lines(A_seq, lambda[i,])
 dat <- list(
   A = standardize(log(d$age)),
   S = d$success,
-  I = as.factor(d$id),
+  H = as.integer(as.factor(d$id)),
   A2 = d$age/80
 )
 mAS <- ulam(
@@ -65,8 +65,6 @@ for (i in 1:30) {
   )
 }
 
-curve(alpha * (1-exp(-beta1 * x)) * exp(-beta2 * x))
-
 
 
 # Question number 2 -------------------------------------------------------
@@ -76,19 +74,19 @@ curve(alpha * (1-exp(-beta1 * x)) * exp(-beta2 * x))
 mID <- ulam(
   alist(
     S ~ bernoulli(p),
-    logit(p) <- abar + z[I] * sigma,
-    z[I] ~ normal(0, 1),
+    logit(p) <- abar + z[H] * sigma,
+    z[H] ~ normal(0, 1),
     abar ~ normal(0,1),
     sigma ~ exponential(1),
     
-    gq> vector[I]:a <<- abar + z*sigma
+    gq> vector[H]:a <<- abar + z*sigma
   ), data = dat, chains = 4, cores = 4
 )
 
 # Plotting posterior predictions for each hunter.
-I_seq <- seq(1, 147, by = 1)
+H_seq <- seq(1, 147, by = 1)
 post <- link(mID, data = list(
-  I = I_seq
+  H = H_seq
 ))
 
 h_means <- d %>% group_by(id) %>% 
@@ -99,11 +97,11 @@ h_means <- d %>% group_by(id) %>%
 mu <- apply(post, 2, mean)
 pi <- apply(post, 2, PI)
 
-plot(h_means$prop, xlab = "Hunters", ylab ="Proportion of Success")
+plot(H_seq,h_means$prop, xlab = "Hunters", ylab ="Proportion of Success", 
+     xlim  = c(0, 20))
 points(mu, col = "red", pc = 2, cex = 0.5)
-shade(pi, I_seq)
 
-# age varying effects.
+# linear age varying effects.
 mIDage <- ulam(
   alist(
     S ~ bernoulli(p),
@@ -143,6 +141,39 @@ points( apply(
 ), col = "blue", pch = 16, cex = 0.5)
 
 
+
+# The solution from the course --------------------------------------------
+
+dat$NH <- max(dat$H)
+
+mH <- ulam(
+  alist(
+    # modelling probability of success
+    S ~ bernoulli(p),
+    p <- a*exp(-b2H[H]*A2)*(1 - exp(-b1H[H]*A2))^g,
+    
+    # transformed paramters b1 and b2:
+    transpars> vector[NH]: b1H <<- exp(b1 + v[1:NH, 1]),
+    transpars> vector[NH]: b2H <<- exp(b2 + v[1:NH, 2]),
+    
+    # non centered varying effects.
+    # building v
+    transpars> matrix[NH,2]:v <- compose_noncentered(sigma_H, L_rho_H, Z),
+    
+    matrix[2, NH]:Z ~ normal(0,1),#uncorrelated and non-standard (and here in the log scale because b1 and b2 have to be positive.)
+    vector[2]:sigma_H ~ exponential(1),
+    cholesky_factor_corr[2]:L_rho_H ~ lkj_corr_cholesky(4), # the required cholesky factor's decomposition
+  
+    # fixed priors:
+    a ~ beta(4,4),
+    g ~ exponential(0.5),
+    c(b1, b2) ~ normal(0, 0.5),
+    
+    #Give me normal Rho
+    gq> matrix[2,2]: Rho_h <<- Chol_to_Corr(L_rho_H)
+  ), data = dat, chains = 4, cores = 15, iter = 2000
+)
+precis(mH,3, pars = c("a","b1","b2","sigma_H"))
 
 
 
