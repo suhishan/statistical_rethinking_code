@@ -1,0 +1,218 @@
+---
+output:
+  html_document: default
+  pdf_document: default
+editor_options:
+  chunk_output_type: inline
+---
+### Introduction 
+
+I am embarking on a journey to further freshen up my bayesian metrics and learn tidyverse ways of interacting with the bayes universe. (not that I don't like base R.) This will be my second reading, and I will try to write down what I have learned in a really simple and haphazard way, in an attempt to make it stick and to interact with it.
+
+```{r include=FALSE}
+library(tidyverse)
+library(flextable)
+library(conflicted)
+library(brms)
+theme_set(theme_linedraw() +
+            theme(panel.grid = element_blank()))
+```
+
+In the text we have a bag with blue and white colored marbles (4 of them). Now without any prior information/evidence, all we have is conjectures i.e. maybe there is 1 white marble and 3 blue marble and other such combinations. However, if we randomly pick out three marbles and they come out blue-white-blue, that's when we can say something about the different colored marbles in the bag.
+
+The relevant question is: Which of the conjectures is most plausible, *given some evidence about the contents of the bag*.
+
+```{r Structure of possibilities of marbles per draw.}
+tibble(draw = 1:3,
+       marbles = 4) %>% 
+  mutate(possibilities = marbles ^ draw)
+
+#First use of tibble, Yay!
+```
+
+Let's make the data.
+
+```{r}
+n_blue <- function(x) rowSums(x == "b")
+n_white <- function(x) rowSums(x == "w")
+
+t <- tibble(
+  d1  = rep(c("w", "b"), times = c(1, 4)), #draw 1
+  d2  = rep(c("w", "b"), times = c(2, 3)), #draw 2
+  d3  = rep(c("w", "b"), times = c(3, 2)), #draw 3
+  d4  = rep(c("w", "b"), times = c(4, 1)), #draw 4
+) %>% 
+  mutate(
+    blue1 = n_blue(.),
+    white1 = n_white(.),
+    blue2 = n_blue(.),
+    blue3 = n_blue(.),
+    product = blue1 * white1 * blue2 * blue3
+  )
+
+```
+
+Including prior information.
+
+So it seems there are two parts to this bayesian thingy : the first part is counting the relative plausibilities of each conjecture given some evidence i.e. sample. *But* the second part is how plausible those conjectures are in the first place, which is conveniently called prior. If we suppose that blue marbles are quite rare and factories don't make that much of them, then our relative plausibilities for each conjecture changes:
+
+```{r mutating some prior factory counts}
+t <- t %>% 
+  rename(pc = product) %>% 
+  mutate(fc = c(0, 3:0), #factory count
+         nc = pc * fc) # new count.
+```
+
+A phrase that hits my intuition nerves: *weighing of plausibilities*
+
+**When we don't know what caused the data, potential causes that may produce the data in more ways are more plausible**
+
+#### Turning these things into probability.
+
+```{r}
+prob_t <- 
+  t %>% select(d1,d2,d3,d4,blue1, white1, blue2) %>% 
+  mutate(
+    p = seq(0,1, length.out = 5), # proprotion of marbles that are blue.
+    product = blue1 * white1 * blue2, #ways to produce data
+    
+    plausibility = product / sum(product)
+  ); prob_t
+```
+
+What have we done here then? What are the stereotypical probability theory names of these things?
+
+1. So, the various *p* values i.e. possible explanations for the data is called the parameter. These are basically the conjectures.
+2. The relative number of ways *p* can actually produce the data i.e. ways to produce the data that we counted from the garden of forking paths, is the *likelihood*
+3. The *Prior* is the prior probability of each conjecture.
+4. The *Posterior* is the posterior probability calculated at last.
+
+### The Globe Tossing model:
+
+Bayesian Analysis: A story for how the data came to be: maybe *descriptive* or *causal*.
+
+Some caution:
+But models of all sorts—Bayesian or not—can be very confident about an inference, even when the model is seriously misleading. This is because the inferences are conditional on the model. What your model is telling you is that, given a commitment to this particular model, it can be very sure that the plausible values are in a narrow range. Under a different model, things might look differently.
+
+Forgive me, but I want to repeatedly keep thinking about this:
+
+
+(1) The number of ways each conjecture could produce an observation
+  a) Since the definition says 'an observation', this is parameter *p* i.e. if the conjecture is 1 blue marble and 3 white marbles, *p* = 1/4.
+(2) The accumulated number of ways each conjecture could produce the entire data.
+  a) This is the likelihood because we are counting for the *entire data*. This relates really well to likelihood functions I have encountered in the past where we have multipled functions. Today I realized its just basically counting.
+(3) The initial plausibility of each conjectured cause of the data.
+  a) This is the prior, something quite new for me (although I have sorta read the book once).
+  
+**The overall goal** : For each possible value of the unobserved variables, such as p, we need to define the relative number of ways—the probability—that the values of each observed variable could arise.
+
+Likelihood : A distribution function assigned to an observed variable.
+
+Let's draw our binomial likelihood with all possible values of *p*.
+
+```{r}
+tibble(p = seq(0, 1, by = .01)) %>% 
+  ggplot(aes(x = p, y = dbinom(6, 9, prob = p))) +
+  geom_line()+
+  labs(
+    x = "Probability of Water",
+    y = "Binomial Likelihood"
+  )
+```
+Beautiful
+
+### Grid Approximation
+The bruteforce way of estimating posterior distribution of *p*.
+
+```{r}
+#20 points.
+
+g <- tibble(
+  p_grid = seq(0,1, length.out = 20),
+  prior = 1
+) %>% 
+  mutate(
+    likelihood = dbinom(6,9, prob = p_grid),
+    unstd_posterior = likelihood * prior,
+    posterior = unstd_posterior/ sum(unstd_posterior)
+  )
+
+#drawing the plot
+
+g %>% 
+  ggplot(aes(p_grid, posterior)) +
+  geom_line()+
+  geom_point()+
+  labs(
+    x = "Grid values of p(proportion of water)",
+    y = "Posterior probability"
+  )
+```
+
+Let me try making this stuff for different priors.
+
+```{r}
+g1 <- tibble(
+  p_grid = seq(0,1, length.out = 20)
+) %>% expand_grid(priors = c("ifelse", "exponential")) %>% 
+  mutate(
+    prior = ifelse(priors == "ifelse", 
+                   ifelse(p_grid < 0.5, 0, 1),
+                   exp(-5 * abs(p_grid - 0.5))),
+    likelihood = dbinom(6,9, prob = p_grid),
+    unstd_posterior = likelihood * prior,
+    posterior = unstd_posterior/ sum(unstd_posterior)
+  ) %>% 
+  mutate(
+    priors = priors)
+  )
+```
+
+```{r}
+g1 %>% arrange(priors) %>% View()
+#plotting
+g1 %>% 
+  arrange(priors) %>% 
+  ggplot(aes(p_grid, posterior)) +
+  geom_line()+
+  geom_point()+
+  labs(
+    x = "Grid values of p(proportion of water)",
+    y = "Posterior probability"
+  )+
+  facet_wrap(~ priors, scales = 'free')
+```
+
+### Let's use library(brms) for Markov Chain Monte Carlo (MCMC)
+
+
+```{r}
+# here the data is w (water) = 24 and number of trials (n = 36)
+b2.1 <- brm(
+  data = list(w = 24),
+  family = binomial(link = "identity"),
+  w | trials(36) ~ 0 + Intercept,
+  prior(beta(1,1), class = b, lb = 0, ub = 1),
+  seed = 2
+  
+)
+
+posterior_summary(b2.1)
+
+
+
+```
+```{r}
+#Let's graph the posterior probability:
+as_draws_df(b2.1) %>% mutate(
+  n = "n = 36"
+) %>% 
+  ggplot(aes(b_Intercept)) +
+  geom_density(fill = "black")+
+  scale_x_continuous("proportion water", limits = c(0,1))+
+  facet_wrap(~n)
+
+
+```
+
+

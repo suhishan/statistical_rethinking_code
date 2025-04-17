@@ -1,0 +1,272 @@
+---
+output:
+  html_document: default
+  pdf_document: default
+editor_options:
+  chunk_output_type: inline
+---
+
+
+```{r include=FALSE}
+library(tidyverse)
+library(flextable)
+library(conflicted)
+library(brms)
+library(tidybayes)
+library(patchwork)
+conflicts_prefer(brms::ar)
+conflicts_prefer(flextable::compose)
+conflicts_prefer(brms::dstudent_t)
+conflicts_prefer(dplyr::lag)
+conflicts_prefer(brms::pstudent_t)
+theme_set(theme_linedraw() +
+            theme(panel.grid = element_blank()))
+```
+
+
+### Sampling the imaginary.
+
+Note: Something that hasn't quite yet gotten under me is the concept of joint probability. It is something to look into.
+
+Let's use the bayes theorem to calculate the vampire probability.
+
+```{r}
+tibble(
+  pr_positive_vampire = 0.95,
+  pr_positive_mortal = 0.01,
+  pr_vampire = 0.001
+) %>% mutate(
+  pr_positive = (pr_positive_vampire * pr_vampire) + 
+    (pr_positive_mortal * (1 - pr_vampire)),
+  pr_vampire_positive = (pr_positive_vampire * pr_vampire) / pr_positive
+) %>% glimpse()
+  
+```
+A 8.7% chance that the suspect is actually vampire.
+
+#### Sampling from the posterior.
+
+Let's use the posterior distribution from our globe tossing example to produce samples from the posterior.
+
+```{r Sampling from the posterior.}
+n <- 1e3
+n_success <- 6
+n_trials <- 9
+
+(
+  d <- tibble(
+    p_grid = seq(0, 1, length.out = n),
+    prior = 1, # a flat prior.
+    likelihood = dbinom(n_success, n_trials, prob = p_grid),
+    posterior = (likelihood * prior) / sum(likelihood * prior)
+  )
+)
+
+n_samples <- 1e4
+
+samples <- d %>% 
+  slice_sample(n = n_samples, weight_by = posterior, replace = T)
+
+glimpse(samples)
+
+samples %>% 
+  mutate(n_samples = 1:n()) %>% 
+  ggplot(aes(n_samples, p_grid)) +
+  geom_point(alpha = 4/10)+
+  scale_y_continuous("Proportion of water (p)", limits = c(0,1))
+
+samples %>% 
+  ggplot(aes(x = p_grid))+
+  geom_density(alpha = 1/10,fill = "black")
+```
+
+#### Summarizing the posterior:
+
+```{r}
+samples %>% 
+  filter(p_grid > .5 & p_grid < .75) %>% 
+  summarise(n()/n_samples)
+```
+ ### Intervals of defined mass.
+ 
+ So what we did before is answer the question, "How much  (what percentage) of the total probability mass lies between parameter values of so and so; or parameter values less than this?" For eg. If only 17% of probability mass lies below *p* < 0.5, we can think of this as a summary of the unlikeliness of *p* less than 0.5.
+ 
+ What we are asking here is: "Between which parameter values  *p* does 50% of the probability mass lies, or 95% of probability mass, or whichever other random percentage?" As the book says, this can be a good summary for the shape of the posterior distribution and some help here and there but its not something hard and fast. For bayesians, the whole distribution is the *estimate*.
+
+```{r}
+q_10_and_90 <- quantile(samples$p_grid, prob = c(.1,.9)) ; q_10_and_90
+```
+The middle 80% of posterior probability mass lies between 0.45 and 0.81.
+All of this can be done with tidybayes.
+
+```{r}
+median_qi(samples$p_grid, .width = .5)
+mode_hdi(samples$p_grid, .width = .5)
+```
+Let's try and draw something:
+
+```{r}
+d %>% 
+  ggplot(aes(x = p_grid,  y = posterior)) +
+  geom_area(
+    data = d %>% 
+      filter(p_grid > qi(samples$p_grid, .width = 0.5)[1] &
+               p_grid < qi(samples$p_grid, .width = 0.5)[2])
+  , fill = "grey75")+
+  geom_line()
+```
+### Point estimates:
+
+Let's draw some point estimates:
+
+```{r}
+#calculating point estimates:
+point_estimates <- bind_rows(
+  samples %>% mean_qi(p_grid),
+  samples %>% mode_qi(p_grid),
+  samples %>% median_qi(p_grid)
+) %>% 
+  select(p_grid, .point)
+
+
+
+#let's draw some lines then on the distribution
+
+d %>% 
+  ggplot(aes(x = p_grid, y = posterior)) +
+  geom_line()+
+  geom_vline(xintercept = point_estimates$p_grid)+
+  scale_x_continuous("Proportion of water (p)", limits = c(.5, .75))
+```
+
+#### On loss functions
+
+Loss functions can be thought of as distances to a correct parameter value( if there is even such a thing and if not, the whole distribution of parameters) as a measure of cost associated with it. If the loss function is abs(guess - p), then if my guess really far way I lose a lot. The best way to minimize this loss is to use the median.
+
+Now we don't do this equally for all guesses because that would always just be a constant for a given value of p. There must be weights for each distance measured and the weights are the posterior plausibilities of each paramter value.
+
+```{r}
+
+
+d %>% 
+  summarise(`expected loss` = sum(posterior * abs(0.5 - p_grid)))
+
+#let's do this for all values of d.
+l <- d %>% 
+  mutate(average_loss = map(p_grid, 
+                            function(d) sum(posterior * abs(d - p_grid)))) %>%
+  unnest(average_loss) %>% 
+  select(p_grid, average_loss) %>% 
+  filter(average_loss == min(average_loss)) %>% View()
+```
+
+#### Simulating predictions (and dummy data)
+
+Before what we did was that we counted the many ways we could count how the observations could've arised given the parameters (proprotion of water). What we are now doing is its complementary : generating counts/likelihoods using the parameters. (We are basically hundreds and thousands of observations using some constant measure of parameter (for eg. p = 0.7)).
+
+
+
+
+
+```{r}
+n_dummy <- 1e5
+
+tibble(
+  dummy_w  = rbinom(n_dummy, n_trials, prob = 0.7)
+ ) %>% 
+  ggplot(aes(x = dummy_w)) +
+  geom_histogram(center = 0, binwidth = 0.5, linewidth = 1/10)+
+  scale_x_continuous(breaks = 0:4 * 2)+
+  coord_cartesian(xlim = c(0,9))
+```
+#### Posterior Predictive Distribution
+
+For each possible value of the parameter p, there is an implied distribution of outcomes. So if you were to compute the sampling distribution of outcomes at each value of p, then you could average all of these prediction distributions together, using the posterior probabilities of each value of p, to get a posterior predictive distribution.
+
+### Understanding something about prediction:
+
+If we only use point estimates to make predictions, we are essentially discarding away important information and as such, our model becomes narrower and leads us to believe that the model is more consistent with the data than it really is. This is because we have tossed away the uncertainity about the parameters.
+
+Propagating parameter uncertainity inside predictions:
+
+```{r}
+#First with no parameter uncertainity
+post_1 <- tibble(
+  w = rbinom(n_samples, n_trials, prob = 0.66) # supposed
+) %>%
+  ggplot(aes(x = w)) +
+  geom_histogram(center = 0, binwidth = 0.5, linewidth = 1/10)+
+  scale_x_continuous(breaks = 0:4 * 2)+
+  coord_cartesian(xlim = c(0,9), ylim = c(0, 2500))
+
+# Propagating paramters uncertainity:
+post_2 <- tibble(
+  w = rbinom(n_samples, n_trials, prob = samples$p_grid )
+) %>% 
+  ggplot(aes(x = w)) +
+  geom_histogram(center = 0, binwidth = 0.5, linewidth = 1/10)+
+  scale_x_continuous(breaks = 0:4 * 2)+
+  coord_cartesian(xlim = c(0,9), ylim =c(0, 2500))
+
+post_1 | post_2
+```
+See how the left plot (without parameter uncertainity included) is much more narrower than the right plot which is much more spread out.
+
+#### Practicing with brms:
+
+```{r}
+b3.1 <- 
+  brm(
+    data = list( w  = 6),
+    family = binomial( link = "identity"),
+    w | trials(9) ~ 0 + Intercept,
+    prior(beta(1,1), class = b, lb = 0, ub = 1),
+    
+    iter = 5000, warmup = 1000,
+    chains = 3
+  )
+
+posterior_summary(b3.1) %>% round(digits = 2)
+
+
+```
+
+Let's extract the model fit.
+
+```{r}
+f <- fitted(b3.1,
+            summary = F, 
+            scale = "linear") %>% 
+  data.frame() %>% 
+  set_names("p")
+
+f %>% 
+  ggplot(aes(x = p))+
+  geom_density(fill = "skyblue")
+  
+```
+ Posterior Predictive now:
+ 
+```{r}
+f <- f %>% 
+  mutate(w = rbinom(n(), n_trials, prob = p))
+
+f %>% 
+  ggplot(aes(x = w)) +
+ geom_histogram(center = 0, binwidth = 1, linewidth = 1/10,
+                color = "black", fill = "skyblue")+
+  scale_x_continuous(breaks = 0:3 * 3)+
+  coord_cartesian(xlim = c(0,9), ylim =c(0, 2500))
+```
+ Again, trying to understand what we have done here step by step.
+ 
+ 1. We observed a sample of 9, with 6 water and 3 land.
+ 2. We fitted a MCMC model (a binomial likelihood model) that gives us relative plausibilities of data for each value of the parameter in question (i.e proportion of water).
+ 3. We get back plausibilities for each *p* from 0 to 1.
+ 4. For the posterior predictive distribution, we try and generate 10000 samples of observed data i.e. sometimes 3 water, sometimes 6 water, sometiems 7 water, etc. where the prob is assigned from what we have extracted as *p* from our own model.
+ 5. This ensures that we have averaged over both the uncertainity inherent in likelihood  (rbinom uncertaninity when we give certain p = 0.6) as well as the uncertainty of *p* itself from our own model. What we generally do not want to do is just extract out a mean point estimate from the posterior eg. *p* = 0.6 let's say and make predictions for those only.
+ 
+ 
+ 
+ 
+ 
