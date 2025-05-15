@@ -1,0 +1,539 @@
+---
+output:
+  html_document: default
+  pdf_document: default
+editor_options:
+  chunk_output_type: console
+---
+
+
+```{r include=FALSE}
+library(tidyverse)
+library(flextable)
+library(conflicted)
+library(brms)
+library(tidybayes)
+library(patchwork)
+theme_set(theme_linedraw() +
+            theme(panel.grid = element_blank()))
+```
+
+### Geocentric Models:
+
+Linear Regression: An Attempt to learn the mean and variance of some measurement, using an additive combination of other measurements.
+
+Why normal distributions are normal? : Let's try and make the soccer field example:
+
+```{r}
+tibble(
+  position = replicate(1000,sum(runif(24, -1, 1)))
+) %>% 
+  ggplot(aes(x = position))+
+  geom_histogram( bins = 30)
+```
+Let's now code the random walk:
+
+```{r}
+#I want a 100 people's each of 16 position:
+pos <- crossing(
+  person = 1:100,
+  step = 0:16, 
+) %>% mutate(
+  deviation = map_dbl(step, ~ifelse(. == 0,0, runif(1, -1, 1)))
+  ) %>% group_by(person) %>% 
+  mutate(position = cumsum(deviation)) %>% 
+  ungroup()
+
+#Let's plot this:
+pos %>% 
+  ggplot(aes(x = step,  y = position, group = person))+
+  geom_line(aes(color = person <2, alpha = person < 2))+
+  scale_color_manual(values = c("skyblue4", "black"))+
+  scale_alpha_manual(values = c(1/5, 1))+
+  geom_vline(xintercept = c(4, 8,16), alpha = 0.5, linetype = 2)+
+  scale_x_continuous(breaks = 0:4 * 4)
+```
+
+Normality is essentially the result of additivity. Take any distribution and generate values from it, a more likely scenario is that values that deviate from the mean in one direction are cancelled out by values that deviate in another and what we are left with is more ways their cumulative sum approaches or lands in zero. This happens to any and all underlying distributions.
+
+```{r}
+#Let's look at the histogram:
+pos %>% 
+  group_by(person) %>% 
+  summarise(p = sum(deviation)) %>% 
+  ggplot(aes(x = p)) +
+  geom_histogram(bins = 30)
+  
+
+#Distributions for multiplicative stuff:
+big <- tibble(
+  values = replicate(1000, prod(1 + runif(12, 0, 0.5)))
+)
+small <- tibble(
+  values = replicate(1000, prod(1 + runif(12, 0, 0.1)))
+)
+
+#Another way of doing the same thing:
+growth <- tibble(
+  growth = map_dbl(1:1e4, ~prod(1 + runif(12, 0, 0.1)))
+)
+
+growth %>% 
+  ggplot(aes(x = growth))+
+  geom_histogram(bins = 30)
+
+big %>% ggplot(aes(x = values)) +geom_histogram(bins = 30)
+small%>% ggplot(aes(x = values)) +geom_histogram(bins = 30)
+```
+
+p
+```{r}
+#A different way of visualizing the same data.
+
+samples <- tibble(
+  big = map_dbl(1:1e4, ~prod(1+runif(12, 0, 0.5))),
+  samll  =  map_dbl(1:1e4, ~prod(1+runif(12, 0, 0.1)))
+)
+
+
+samples %>% 
+  pivot_longer(everything(), values_to = "samples") %>% 
+  ggplot(aes(x = samples))+
+  geom_density(fill = "black")+
+  facet_wrap(~name, scales = "free")
+```
+
+
+
+
+### Why Gaussian:
+
+A fantastic quote: 
+These processes do this because at their heart, these processes add together fluctuations. And repeatedly adding finite fluctuations results in a distribution of sums that have shed all information about the underlying process, aside from mean and spread.
+
+Gaussian Distribution is part of the *Exponential Family*.
+
+Another Reason: When all we know or are willing to say about a distribution of measures (measures are continuous values on the real number line) is their mean and variance, then the Gaussian distribution arises as the most consistent with our assumptions.
+
+### Building Models:
+
+A thing to understand: If, in light of the data and model, we approximate/estimate posterior plausibilities for a lot of mu and sigma values, in effect we are assigning posterior probabilities to a whole host of gaussian distributions, and ranking them as some more probable than others. In other words, it becomes a distribution of distributions.
+
+
+### First Gaussian Model:
+
+```{r}
+library(rethinking)
+data(Howell1)
+d <- Howell1
+rm(Howell1)
+detach(package:rethinking, unload = T)
+library(brms)
+
+```
+
+```{r}
+d %>% summary()
+d %>% glimpse()
+d %>% 
+  pivot_longer(everything()) %>% 
+  mutate(name = factor(name, levels = c("height", "weight", "age","male"))) %>% 
+  ggplot(aes(x = value))+
+  geom_histogram(bins = 30, fill = "skyblue", color = "black")+
+  facet_wrap(~name, scales = "free")
+
+# Only Adults
+d2 <- d %>% 
+  filter(age>=18)
+
+```
+I did understand the likelihood function : h_i is normally distributed with parameters mu and sigma. Bur is Pr(mu, sigma) jointly distributed or independently and if independently, why is Pr(mu, sigma) = Pr(mu) Pr(sigma).
+
+Drawing the prior of mu ~ Normal(178, 20)
+
+```{r}
+p1 <- tibble( #mean prior
+  x = seq(100, 250, by = .1)
+) %>% 
+  ggplot(aes(x = x, y = dnorm(x, 178, 20)))+
+  geom_line()
+
+p1
+
+p2 <- tibble( #sigma prior
+  x = seq(-10, 60, by = .1)
+) %>% 
+  ggplot(aes(x = x, y = dunif(x, 0, 50)))+
+  geom_line()
+
+p2
+```
+```{r}
+#Prior Predictive Simulation:
+
+p3 <- tibble(
+  mu = rnorm(1e3, 178, 50),
+  sigma  = runif(1e3, 0, 50),
+
+) %>% 
+  ggplot(aes( x = rnorm(1e3, mu, sigma)))+
+  geom_density(fill = "skyblue")+
+  scale_x_continuous(breaks = c(0, 73,178, 284))
+
+p3
+```
+This is the expected distribution of heights *averaged over the priors*.
+
+```{r}
+# Unsensible Priors
+p4 <- tibble(
+  mu = rnorm(1e3, 178, 100),
+  sigma  = runif(1e3, 0, 50),
+
+) %>% 
+  ggplot(aes( x = rnorm(1e3, mu, sigma)))+
+  geom_density(fill = "skyblue")+
+  geom_vline(xintercept = c(0, 178), linetype = 2)
+  scale_x_continuous(breaks = c(0, 73,178, 284))
+
+p4
+
+(p1 | p2) / (p3 | p4)
+```
+### Grid Approximation
+
+Note: Marginal posterior densities means 'averaging over the other parameters'.
+
+Let's do the absolutely transparent grid approximation:
+
+```{r}
+n <- 200
+
+d_grid <- crossing(
+  mu = seq(140, 160, length.out = n),
+  sigma = seq(4, 9, length.out = n)
+)
+
+glimpse(d_grid)
+
+grid_function <- function(mu, sigma) {
+  dnorm(d2$height, mean = mu, sd = sigma, log = TRUE ) %>% 
+    sum()
+}
+
+d_grid <- d_grid %>% 
+  mutate(log_likelihood = map2(mu, sigma, grid_function)) %>% 
+  unnest(log_likelihood) %>% 
+  mutate(
+    prior_mu = dnorm(mu, 178, 20, log = TRUE),
+    prior_sigma  = dunif(sigma, 0, 10, log = TRUE)
+  ) %>% 
+  mutate(
+    product = log_likelihood + prior_mu + prior_sigma,
+    probability = exp(product  - max(product))
+  )
+
+head(d_grid)
+
+```
+What we have done here is: for every combination of mu and sigma, our conjectures/parameters, we have counted the ways the *whole data* could have arised. Because we are looking at whole data, and if we assume independence and identically distributed, then we multiply their independent likelihoods to get a huge multiplicative log-likelihood (sum in log terms). Then we have multiplied that with our priors to get relative plausbilities. 
+Let's plot the posterior probabilities:
+
+```{r}
+d_grid %>% 
+  ggplot(aes(x = mu, y = sigma, z = probability))+
+  geom_contour()+
+  coord_cartesian(xlim = range(d_grid$mu),
+                  ylim = range(d_grid$sigma))
+
+# We can also make heatmaps
+d_grid %>%
+  ggplot(aes(x = mu, y = sigma, fill = probability))+
+  geom_raster(interpolate = T)+
+  scale_fill_viridis_b(option = "B")
+```
+Let's sample from the posterior to learn better:
+
+```{r}
+d_grid_samples <- 
+  d_grid %>% 
+  sample_n(size = 1e4, replace = T, weight = probability)
+
+d_grid_samples %>% 
+  ggplot(aes(x = mu, y = sigma))+
+  geom_point(alpha = 1/10)+
+  scale_fill_viridis_c()
+
+d_grid_samples %>% 
+  pivot_longer(c(mu, sigma)) %>% 
+  ggplot(aes(x = value)) +
+  geom_density(fill = "skyblue", alpha = 1/2)+
+  facet_wrap(~name, scales = "free")
+```
+### Let's now do big boy things : brm again.
+
+```{r}
+b4.1 <- brm(
+  data = d2, 
+  family = gaussian, 
+  height ~ 1,
+  prior = c(
+    prior(normal(178, 20), class = Intercept),
+    prior(uniform(0, 50), class = sigma, ub = 50)
+  ),
+  iter = 2000, warmup = 1000, chains = 4, cores = 4,
+  seed = 4
+  
+)
+b4.1$fit
+b4.1 %>% summary()
+
+```
+
+
+```{r}
+#Inspecting our MOdel:
+
+plot(b4.1)
+print(b4.1)
+b4.1$fit
+summary(b4.1)$fixed
+```
+
+#### Understanding the Marginal Distribution
+
+What the summary measures of mu and sigma that we get from the model, suppose for mu, is the plausibility of each value of mu, after *averaging over* the plausibilities of each value of sigma. 
+
+#### Back to brms fit:
+
+```{r}
+#Extracting the variance covariance matrix:
+post <- as_draws_df(b4.1) #as_draws_df extracts samples of paramters from the mdoel.
+glimpse(post)
+
+select(post, b_Intercept:sigma) %>% 
+  cov() %>% 
+  diag() %>% 
+  sqrt()
+
+post %>% 
+  select(b_Intercept, sigma) %>% 
+  cor()
+
+str(post)
+```
+
+```{r}
+# Summarizing with quantiles.
+
+post %>% 
+  pivot_longer(b_Intercept:sigma) %>% 
+  group_by(name) %>% 
+  summarise(
+    mean = mean(value),
+    sd = sd(value),
+    `2.5%` = quantile(value, probs = 0.025),
+    `97.5%` = quantile(value, probs = .975)
+  ) %>% 
+  mutate_if(is.numeric, round, digits = 2)
+
+posterior_summary(b4.1)
+
+histospark(posot$b_Intercept)
+```
+
+#### Now we move onto linear prediction : writing one variable in terms of the expectation of another.
+
+Up until now, what we have done is modeled height in a Gaussian Way i.e. if all we are going to assume of height is its mean and some spread, then we can assume heights follow a Gaussian Distribution. Then we have used Bayes to find the likelihood, used some priors for mu (central tendency) and sigma(spread) to describe the sample of heights. 
+
+However, heights may have a predictor, a variable associated with it that can predict it in meaningful ways. 
+
+```{r}
+glimpse(d2)
+
+d2 %>% 
+  ggplot(aes(x = weight, y = height))+
+  geom_point()
+```
+
+If we assume linearity, then we are assuming that the predictor variable has a constant and additive relationship to the dependent variable. This relationship is denoted by a parameter, and as previously, all possible relationships are ranked by their relative plausibility given the model and the data. 
+
+Let's make a prior predictive simulation.
+
+```{r}
+#Number of lines 
+nlines <- 100
+
+lines <- tibble(
+  n = 1:nlines, #1:100 lines
+  a = rnorm(nlines, mean = 178, sd = 10),
+  b = rnorm(nlines, mean = 0, sd = 10)
+) %>% 
+  expand_grid(weight = range(d2$weight)) %>% 
+  mutate(
+    height = a + b * (weight - mean(d2$weight))
+  )
+# Not really a line per se, but connecting two points in the extreme.
+# So range of weight has two values 31 and 61. We are subtracting both these weight(x) extremes by means and deterministically determining height.
+
+lines %>% 
+  ggplot(aes(x = weight, y = height, group = n))+
+  geom_hline(yintercept = c(0, 272), linetype = 2:1)+
+  geom_line(alpha = 1/10)
+
+```
+
+
+So, lines (relationships) drawn from these priors are quite absurd. What if we restrict beta to positive values instead i.e. b follows a log-normal distribution, which means, the logarithm of b is normal. 
+
+```{r}
+lines <- tibble(
+  n = 1:nlines, #1:100 lines
+  a = rnorm(nlines, mean = 178, sd = 10),
+  b = rlnorm(nlines, mean = 0, sd = 1) #log-normal distribution
+) %>% 
+  expand_grid(weight = range(d2$weight)) %>% 
+  mutate(
+    height = a + b * (weight - mean(d2$weight))
+  )
+lines %>% 
+  ggplot(aes(x = weight, y = height, group = n))+
+  geom_hline(yintercept = c(0, 272), linetype = 2:1)+
+  geom_line(alpha = 1/10)
+
+
+```
+
+Let's now fit a statistical model:
+
+```{r}
+d2 <- d2 %>% 
+  mutate(
+    weight_c = weight - mean(weight) #mean centered weight.
+  )
+
+b4.3 <- brm(
+  data = d2,
+  family = gaussian,
+  height ~ 1 + weight_c,
+  prior = c(
+    prior(normal(178, 20), class = Intercept),
+    prior(lognormal(0,1), class = b, lb = 0),
+    prior(uniform(0, 10), class = sigma, ub = 10)
+  ),
+  iter = 2000, warmup = 1000, chains = 4, cores = 4
+)
+
+summary(b4.3, prob = 0.89)
+
+
+```
+
+Let's use the samples from the posterior to make some inferences.
+
+```{r}
+post_3 <- as_draws_df(b4.3)
+
+#covariances among parameters.
+as_draws_df(b4.3) %>% 
+  select(b_Intercept:sigma) %>% 
+  cov() %>% 
+  round(3)
+
+pairs(b4.3)
+```
+
+When using samples, here's something to think about: what bayesian posterior distributions estimates as posterior distribution of parameters is the *correlated joint posterior* of all three parameters. 
+
+Plotting out posterior inference (lines) with the data.
+
+```{r echo=FALSE}
+d2 %>% 
+  ggplot(aes(x = weight_c, y = height))+
+  geom_abline(
+    intercept = fixef(b4.3)[1],
+    slope = fixef(b4.3)[2]
+  )+
+    geom_point(shape = 1, color = "royalblue")
+
+# Adding uncertainity around the mean.
+
+post_3 %>% 
+  slice(1:5)
+
+# Plotting the first 20 lines.
+
+labels <- c(-10, 0, 10) + mean(d2$weight) %>% round(0)
+d2 %>% 
+ggplot(
+       aes(x = weight_c, y = height))+
+  geom_point(shape = 1, color = "royalblue")+
+  geom_abline(data = post_3 %>% slice(1:50),
+              aes(intercept = b_Intercept, slope = b_weight_c),
+              alpha = 1/10)+
+  scale_x_continuous("weight",
+                     breaks = c(-10, 0, 10),
+                     labels = labels)
+```
+
+A phenomena to note here: the model's uncertainty increases for higher and lower weight values. 
+
+Let's now make contours around the line.
+What is going on here?: Well, weight is our predictor, which means for every value of weight, we have a predicted height, where the prediction is calculated by our linear formula for mu. 
+
+```{r}
+# For example Computing mu at weight = 50.
+mu_at_50 <- 
+  post_3 %>% 
+  mutate(
+    mu_at_50 = b_Intercept + b_weight_c *(50 - mean(d2$weight)),
+    .keep = "none"
+  )
+
+
+mu_at_50 %>% 
+ggplot(aes(x = mu_at_50))+
+  geom_density(linewidth = 0,fill = "skyblue")+
+  xlab(expression(mu["height|weight = 50"]))
+
+```
+Every value of weight has a whole distribution as prediction (if we are assuming linear relationship between height and weight). This is pretty sick. 
+
+
+Let's display summary information (mean and credible intervals for every weight)
+
+```{r}
+weight_seq <- tibble(
+  weight = 25:70,
+  weight_c = weight - mean(d2$weight)
+)
+
+mu <- fitted(
+  b4.3, 
+  summary = F, 
+  newdata = weight_seq
+) %>% 
+  data.frame() %>% 
+  set_names(25:70) %>% 
+  mutate(iter = 1:n())
+
+mu %>% View()
+
+#reformatting to long format.
+
+mu <- mu %>% 
+  pivot_longer(-iter,
+               names_to = "weight",
+               values_to = "height") %>% 
+  mutate(weight = as.numeric(weight))
+
+# Now let's plot.
+
+d2 %>% 
+  ggplot(aes(x = weight, y = height))+
+  geom_point(data = mu %>% filter(iter<101),
+             color = "royalblue", alpha = .05)
+
+```
+
+
