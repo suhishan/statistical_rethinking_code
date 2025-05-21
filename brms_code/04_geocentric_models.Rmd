@@ -16,6 +16,10 @@ library(tidybayes)
 library(patchwork)
 theme_set(theme_linedraw() +
             theme(panel.grid = element_blank()))
+
+conflict_prefer("filter", "dplyr")
+conflict_prefer_all("brms")
+conflict_prefer_all("posterior", "stats")
 ```
 
 ### Geocentric Models:
@@ -526,7 +530,7 @@ mu <- mu %>%
                names_to = "weight",
                values_to = "height") %>% 
   mutate(weight = as.numeric(weight))
-
+mu %>% View()
 # Now let's plot.
 
 d2 %>% 
@@ -536,4 +540,194 @@ d2 %>%
 
 ```
 
+Let's now plot the regression line with compatibility intervals.
+
+```{r}
+mu_summary <- fitted(
+  b4.3,
+  newdata = weight_seq
+) %>% data.frame() %>% 
+  bind_cols(weight_seq)
+
+d2 %>% 
+  ggplot(aes(x = weight, y = height))+
+  geom_point(shape = 1)+
+  geom_smooth(
+    data = mu_summary,
+    aes(y = Estimate, ymin = Q2.5, ymax = Q97.5),
+    stat = "identity",
+    color = "black"
+  )+
+  coord_cartesian(xlim = range(d2$weight))
+```
+
+#### Prediction intervals for actual height and not average height.
+
+What's the difference you may ask? (Well I ask). Here's how I have come to understand it. What we did previously was looked at *average height* mu, and given mu is deterministic really, any uncertainty associated with mu was derived from uncertainty in the parameters that determined it i.e. a + b*weight_c : a and b.
+
+But our models is: h_i ~ Normal(mu_i, sigma). We still have actual height to look at. And if we want to look at actual height, then we must incorporate information from both mu (heights generally fall around mu) and its dispersion (sigma). 
+
+```{r}
+pred_height <- predict(
+  b4.3,
+  newdata = weight_seq
+) %>% data.frame() %>% 
+  bind_cols(weight_seq)
+
+d2 %>% 
+  ggplot(aes(x = weight))+
+  geom_point(
+    aes(y = height),
+    shape = 1)+
+  geom_smooth(
+    data = mu_summary,
+    aes(y = Estimate, ymin = Q2.5, ymax = Q97.5),
+    stat = "identity",
+    color = "black"
+  )+
+  geom_ribbon(data = pred_height,
+              aes(ymin = Q2.5, ymax = Q97.5),
+              alpha = 0.3)+
+  coord_cartesian(xlim = range(d2$weight))
+
+
+```
+
+
+```{r}
+#Making our own sim
+post_3 %>% 
+  expand_grid(weight = 25:70) %>% 
+  mutate(weight_c = weight - mean(d2$weight)) %>% 
+  mutate(
+    sim_height = rnorm(n(), b_Intercept + b_weight_c * weight_c, sigma)
+  ) %>%
+  group_by(weight) %>% 
+  summarize(
+    mean = mean(sim_height),
+    ll = quantile(sim_height, prob = 0.025),
+    ul = quantile(sim_height, prob = 0.975)
+  )
+
+```
+
+What we are doing here is creating our own simulation function of heights? 
+How? So for simulated distribution of heights we need:
+
+1. unique value of weight.
+2. the whole distribution of a and b parameter values for mu
+3. the whole distribution of sigma.
+
+
+### Curves and Splines.
+
+Fitting polynomial regressions. 
+
+```{r}
+d %>% glimpse()
+
+d %>% 
+  ggplot(aes(weight, height))+
+  geom_point(shape = 1, color = "navyblue") +
+  annotate(
+    geom = "text",
+    x = 30, y = 100, 
+    label = "This relation is \n visibly curved"
+  )
+
+# Let's standardize the variables.
+
+d <- d %>% 
+  mutate(
+    weight_s = (weight - mean(weight))/sd(weight),
+    weight_s2 = weight_s^2
+  )
+```
+
+
+```{r}
+#Let's fit the polynomial regression
+b4.5 <- 
+  brm(data = d, 
+      family = gaussian,
+      height ~ 1 + weight_s + weight_s2,
+      prior = c(prior(normal(178, 20), class = Intercept),
+                prior(lognormal(0, 1), class = b, coef = "weight_s"),
+                prior(normal(0, 1), class = b, coef = "weight_s2"),
+                prior(uniform(0, 50), class = sigma, ub = 50)),
+      iter = 2000, warmup = 1000, chains = 4, cores = 4,
+      seed = 4,
+      file = "brms_code/fits/b04.05")
+
+# The code doesn't seem to work, maybe we'll see some solutions else
+```
+
+
+```{r}
+weight_seq <- tibble(
+  weight_s =  seq(-2.5, 2.5, length.out = 30),
+  weight_s2 =  weight_s^2
+)
+
+fit_quad <- fitted(b4.5, 
+                   newdata = weight_seq) %>% 
+  data.frame() %>% 
+  bind_cols(weight_seq)
+
+pred_quad <- predict(b4.5, 
+                     newdata = weight_seq) %>% 
+  data.frame() %>% 
+  bind_cols(weight_seq)
+```
+
+
+Let's draw the plot
+
+```{r}
+d %>% 
+  ggplot(aes(x = weight_s))+
+  geom_point(aes(y = height), color = "navyblue", shape = 1)+
+  geom_smooth(data = fit_quad, 
+              stat = "identity",
+              color = "black",
+              linewidth = 0.5,
+              aes(y = Estimate, ymin = Q2.5, ymax = Q97.5))+
+  geom_ribbon(data = pred_quad, 
+              aes(ymin = Q2.5, ymax = Q97.5),
+              alpha = 1/10)
+```
+
+#### Splines
+
+```{r}
+# Load the cherry blossoms data.
+library(rethinking)
+data("cherry_blossoms")
+d <- cherry_blossoms
+
+rm(cherry_blossoms)
+detach(package:rethinking, unload = T)
+```
+
+
+```{r}
+# Making a summary table for the dataset. We pivot_longer everything, then
+# group by the name and find summary statistics of values. n
+
+d %>% pivot_longer(everything()) %>% 
+  group_by(name) %>% 
+  summarize(mean = mean(value, na.rm = T),
+            sd = sd(value, na.rm =T), 
+            lb = quantile(value, prob = 0.045, na.rm = T),
+            ub = quantile(value, prob = 0.945, na.rm = T)) %>% 
+  mutate_if(is.double, round,digits =  2)
+
+
+d %>% 
+  ggplot(aes(x = year, y = doy))+
+  geom_point(color = "#ffb7c5", alpha = 0.9)+
+  theme_bw()+
+  theme(panel.grid = element_blank(), 
+        panel.background = element_rect(fill = "#4f455c"))
+```
 
