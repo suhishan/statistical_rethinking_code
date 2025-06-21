@@ -1,0 +1,381 @@
+---
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+## This is about Causal Inference and DAGs. 
+
+
+```{r}
+library(tidyverse)
+library(ggrepel)
+library(brms)
+
+theme_set(theme_bw() + 
+            theme(panel.grid = element_blank()))
+data(WaffleDivorce, package = "rethinking")
+d <- WaffleDivorce
+
+d <- d %>% 
+  mutate(
+    d = rethinking::standardize(Divorce),
+    m = rethinking::standardize(Marriage),
+    a = rethinking::standardize(MedianAgeMarriage)
+  )
+```
+
+
+Using various themes to make plot 5.1 from the book.
+
+```{r}
+d %>% 
+  ggplot(aes(x = WaffleHouses/Population, y = Divorce))+
+  geom_point(color = "firebrick4", size = 1.5)+
+  geom_smooth(method = "lm", fullrange = T,
+               color = "firebrick4", fill = "firebrick4",
+               alpha = 1/5, linewidth = 1/2) +
+  scale_x_continuous("Waffle Houses per Million",
+                     limits = c(0, 55)) +
+  coord_cartesian(xlim = c(0, 50), ylim = c(5, 15)) + #text in map under here. 
+  geom_text_repel(
+    data = d %>% filter(Loc %in% c("ME","OK", "AR", "AL")),
+    aes(label = Loc), 
+    size = 3
+  )
+```
+
+
+#### Let's fit our first statistical model.
+MedianAgeAtMarriage ---> Divorce Rate.
+
+```{r}
+b5.1 <- brm(
+  data = d, 
+  family = gaussian, 
+  d ~ 1 + a, 
+  prior = c(
+    prior(normal(0, 0.2), class = Intercept),
+    prior(normal(0, 0.5), class = b),
+    prior(exponential(1), class = sigma)
+  ),
+  iter = 2000, warmup = 1000, chains = 4, cores = 5,
+  sample_prior = T
+)
+
+print(b5.1)
+```
+
+
+We have fit our model. Let's look at the prior draws.
+
+```{r}
+prior <- prior_draws(b5.1)
+
+prior %>% 
+  slice_sample(n = 50) %>%
+  rownames_to_column("draw") %>% 
+  expand_grid(a = c(-2, 2)) %>%  #a is MedianAgeatMarriage std
+  mutate(d = Intercept + b *a) %>% 
+  
+  ggplot(aes(x = a, y = d)) +
+  geom_line(aes(group = draw), 
+            color = "firebrick", alpha = 1/5)
+
+```
+
+Let's display the model's fitted line against the data.
+
+```{r}
+#Let's get the fit.
+nd <- tibble(a = seq(-3, 3, length.out = 30))
+
+fitted(b5.1,
+       newdata = nd) %>% 
+  data.frame() %>% 
+  bind_cols(nd) %>% 
+  
+  ggplot(aes(x = a))+
+  geom_smooth(aes(y = Estimate, ymin = Q2.5, ymax = Q97.5), 
+              stat = "identity",
+              alpha = 1/5,
+              linewidth = 1/4, 
+              color = "firebrick4", 
+              fill = "firebrick4")+
+  geom_point(aes( y = d), data = d, 
+             color = "firebrick", 
+             size = 2)+
+  labs(x = "Median Age at Marraige(std)",
+       y = "Divorce Rate(std)")+
+  coord_cartesian(xlim = range(d$a),
+                  ylim = range(d$d))
+  
+```
+
+Let me fit the relationship between marriage rate and divorce rate by myself.
+
+Marriage Rate in a State ---> Divorce Rate in a State.
+
+```{r}
+b5.2 <- brm(
+  data = d, 
+  family = gaussian, 
+  d ~ 1 + m, 
+  prior = c(
+    prior(normal(0, 0.2), class = Intercept),
+    prior(normal(0, 0.5), class = b),
+    prior(exponential(1), class = sigma)
+  ),
+  iter = 2000, warmup = 1000, chains = 4, cores = 5,
+  sample_prior = T
+)
+ 
+```
+
+```{r}
+ndm <- tibble(m = seq(-3, 3), length.out = 30)
+
+fitted(b5.2, 
+       newdata = ndm) %>% 
+  data.frame() %>% 
+  bind_cols(ndm) %>% 
+  
+  ggplot(aes(x = m))+
+  geom_smooth(aes(y = Estimate, ymin = Q2.5, ymax = Q97.5), 
+              stat = "identity",
+              alpha = 1/5,
+              linewidth = 1/4, 
+              color = "firebrick4", 
+              fill = "firebrick4")+
+  geom_point(aes( y = d), data = d, 
+             color = "firebrick", 
+             size = 2)+
+  labs(x = "Marriage Rate(std)",
+       y = "Divorce Rate(std)")+
+  coord_cartesian(xlim = range(d$m),
+                  ylim = range(d$d))
+  
+```
+
+
+#### Thinking about the Regression.
+
+Is D _||_ M | A i.e. after I know about the state's median age at marriage, is their any value in knowing the marriage rate to predict/understand the divorce rate? Is the association between Marriage and Divorce simply because of Median Age at Marriage.
+
+
+Let's look at the correlation first. 
+
+```{r}
+d %>% 
+  select(d:a) %>% 
+  cor()
+
+
+#Let's now fit a model.
+b5.3 <- brm(
+  data = d, 
+  family = gaussian, 
+  d ~ 1 + m + a, 
+  prior = c(
+    prior(normal(0, 0.2), class = Intercept),
+    prior(normal(0, 0.5), class = b),
+    prior(exponential(1), class = sigma)
+  ),
+  iter = 2000, warmup = 1000, chains = 4, cores = 5,
+  sample_prior = T, 
+  fit = "fits/b05.03"
+)
+
+print(b5.3)
+
+```
+
+
+# Simulating our divorce data.
+
+```{r}
+n <- 50
+sim_d <- tibble(
+  age = rnorm(n, 0, 1)
+) %>% 
+  mutate(
+    div = rnorm(n, -age, 1),
+    mar = rnorm(n, age, 1)
+  )
+
+b5.3_sim <- update(
+  b5.3, 
+  newdata = sim_d,
+  formula = div ~ 1 + age + mar,
+  seed = 5
+)
+
+print(b5.3_sim)
+```
+
+
+
+#Plotting to help ourselves understand multivariate regression.
+
+#a) Predictor Residual plots. 
+
+Explanation : In a general regression (here linear), we have one outcome variable and sometimes multiple predictor variables. The effect of this predictors is its unique effect on outcome, after cancelling out its association with other predictors. This is true for all predictors. For example, in the regression Div = Marriage Rate + Age at Marriage, the effect of A is the part of A not explained by marriage rate itself, i.e. conditioning on marriage rate one can say. As such, in a predictor residual plot we can visualize this by:
+
+1) Regress one predictor on another predictor and obtain residuals (information not explained by other predictors)
+2) Regress the outcome on these residuals and plot them (residuals being proxy of segregated and unique to itself information of that specific predictor.)
+
+Now although multivariate regression does do all of this automatically, what if predictors are not related to one another is nice linear additive ways. One must keep in mind that a linear multivariate assumes so. 
+
+```{r}
+#Let me try on my own. 
+b5.3_am <- brm(
+  data = d, 
+  family = gaussian, 
+  a ~ 1 + m, 
+  prior = c(
+    prior(normal(0, 0.2), class = Intercept),
+    prior(normal(0, 0.5), class = b),
+    prior(exponential(1), class = sigma)
+  ),
+  iter = 2000, warmup = 1000, chains = 4, cores = 5,
+  sample_prior = T
+)
+
+
+```
+
+Take fitted values of a, and subtract it with actual values of a to get a's residuals. Then, run another linear regression of divorce rate on residuals, and now plot this relationship. 
+
+```{r}
+r <- residuals(b5.3_am)
+
+d$r <- rethinking::standardize(r$Estimate)
+b5.3_dr <- brm(
+  data = d, 
+  family = gaussian, 
+  d ~ 1 + r, 
+  prior = c(
+    prior(normal(0, 0.2), class = Intercept),
+    prior(normal(0, 0.5), class = b),
+    prior(exponential(1), class = sigma)
+  ),
+  iter = 2000, warmup = 1000, chains = 4, cores = 5,
+  sample_prior = T
+)
+
+fitted_dr <- fitted(b5.3_dr) %>% 
+  data.frame() %>% 
+  bind_cols(d)
+
+d %>% 
+  ggplot(aes(x = r, y = d)) +
+  geom_point(color = "red", size = 3, shape = 1)+
+  geom_smooth(data = fitted_dr,
+              stat = "identity",
+              aes(y = Estimate, ymin = Q2.5, ymax = Q97.5 ),
+              color = "black")+
+  geom_vline(xintercept = 0, linetype = 2)+
+  geom_text_repel(data = . %>% filter(Loc %in% c("WY", "ND")),
+                  aes(label = Loc))+
+  labs(
+    x = "Age at Marrage residuals (std)",
+    y = "Divorce Rate (std)",
+    subtitle = "The black line is the linear regression line of
+    divorce rate regressed on age at marrage residuals.",
+    title = "Predictive Residual plots"
+  )
+
+```
+
+
+#b) Posterior Predictive Plots. 
+
+Plot Observed divorce data against its prediction. 
+
+```{r}
+# let's get the estimated mu for divorce rate for model b5.3
+fitted(b5.3) %>% 
+  data.frame() %>% 
+  bind_cols(d) %>% 
+  ggplot(aes(x = d, y = Estimate))+
+  geom_point(shape = 1, size = 3, color = "red")+
+  geom_abline(slope = 1, intercept = 0, linetype = 2)+
+  ylim(c(-2, 2))+
+  geom_linerange(aes(ymin = Q2.5, ymax = Q97.5), color = "firebrick")
+
+
+```
+
+
+
+#Counterfactual Plots.
+
+This is about simulating an intervention. Let's pick an intervening predictor: Median Age at marriage. What we do is simulate some value of Age at Marriage(A) and put this into our structural causal model. A will influence Marriage Rate Separately which then influences divorce, and then A has its own independent effect on Divorce. 
+
+For this we want a full-blown Bayes, where we must invoke multivariate syntax such that the whole causal model is at once estimated. 
+
+```{r}
+# The two models as implied by the DAGs are:
+d_model <- bf(d ~ 1 + a + m)
+m_model <- bf(m ~ 1 + a)
+
+b5.3_A <- brm(
+  data = d,
+  family = gaussian,
+  d_model + m_model + set_rescor(FALSE),
+  prior = c(
+    prior(normal(0, 0.2), class = Intercept, resp = d),
+    prior(normal(0, 0.5), class = b, resp = d),
+    prior(exponential(1), class = sigma, resp = d),
+    
+    prior(normal(0, 0.2), class = Intercept, resp = m),
+    prior(normal(0, 0.5), class = b, resp = m),
+    prior(exponential(1), class = sigma, resp = m)),
+  iter = 2000, warmup = 1000, seed = 5, cores = 4, chains = 4,
+  file = "brms_code/fits/b05.03_A"
+)
+
+
+
+```
+
+Making counterfactual plots:
+
+```{r}
+print(b5.3_A)
+
+#Simualting an intervention and looking at its overall causal effect.
+
+nd <- tibble(a = seq(-2,2, length.out = 30),
+             m = 0)
+
+predict(b5.3_A, 
+        newdata = nd,
+        resp = "d") %>% 
+  data.frame() %>% 
+  bind_cols(nd) %>% 
+  ggplot(aes(x = a, y = Estimate, ymin = Q2.5, ymax = Q97.5))+
+  geom_smooth(stat = "identity", color = "firebrick", fill = "firebrick", alpha = 1/5)+
+  labs(x = "Manipulated A",
+       y = "Counterfactual D")
+
+
+```
+
+Let's look at the causal effect of increasing the median age at marriage in a state from 20 years to 30 years.
+
+```{r}
+nd <- tibble(a = (c(20, 30) - 26.1)/ 1.24,
+             m = 0) # mean(age) = 26.1 and sd is 1.24
+
+predict(b5.3_A,
+        newdata = nd,
+        resp = "d",
+        summary = F) %>% 
+  data.frame() %>% 
+  set_names("a20", "a30") %>% 
+  mutate(difference = a20 - a30) %>% 
+  summarize(causal_effect = mean(difference))
+
+#
+```
+

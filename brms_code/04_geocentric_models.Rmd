@@ -429,7 +429,7 @@ b4.3 <- brm(
 )
 
 summary(b4.3, prob = 0.89)
-
+pairs(b4.3)
 
 ```
 
@@ -472,7 +472,7 @@ d2 %>%
 ggplot(
        aes(x = weight_c, y = height))+
   geom_point(shape = 1, color = "royalblue")+
-  geom_abline(data = post_3 %>% slice(1:50),
+  geom_abline(data = post_3 %>% slice(1:20),
               aes(intercept = b_Intercept, slope = b_weight_c),
               alpha = 1/10)+
   scale_x_continuous("weight",
