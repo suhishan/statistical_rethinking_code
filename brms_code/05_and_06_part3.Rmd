@@ -1,0 +1,445 @@
+---
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+```{r}
+library(brms)
+library(ggrepel)
+library(tidyverse)
+
+theme_set(theme_bw() + 
+            theme(panel.grid = element_blank()))
+
+```
+
+# The selection Distortion Effect.
+
+If there are categories considered in a selection, after selection, we are likely to see negative correlation between the categories : like for example, good looking actors being bad at acting and decent looking people being good. 
+
+If the only way to cross the threshold is to score high, it is more common to score high in one category than both. 
+
+Why is this important in the context of linear regression? Well, it is because adding predictors in a linear regression induces statistical selection within the model. Let's try and show this in a simulation.
+
+```{r}
+N <- 200 # Number of grant proposals.
+p <- 0.1 # proportion that are going to be selected. 
+
+tibble(
+  nw = rnorm(N), # notice how newsworthyness and trustworthyness are uncorrelated.
+  tw =  rnorm(N),
+  s = nw + tw,
+  selected = ifelse(s > quantile(s, 1-p), 1, 0)
+) %>% 
+  ggplot(aes(x = nw, y = tw, color = selected))+
+  geom_point(shape = 1, size = 3, aes(color = as.factor(selected)))+
+  geom_smooth(data = . %>% filter(selected == 1), method = "lm", fullrange = T,
+              color = "lightblue", alpha = 3/4, se = F)+
+  scale_color_manual(values = c("black", "lightblue"))+
+  coord_cartesian(ylim = range(tw))
+  
+
+```
+
+
+# Multicollinearity
+
+Let's predict height using leg lengths.
+
+```{r}
+N <- 100 # Hundred Individuals.
+
+c <- tibble(
+  height = rnorm(N, 10, 2),
+  leg_prop = runif(N, 0.4, 0.5),
+  leg_left = (leg_prop * height) + rnorm(N, 0, 0.2),
+  leg_right = (leg_prop * height) + rnorm(N, 0, 0.2)
+)
+
+b6.1 <- brm(
+  data = c, 
+  family = gaussian, 
+  height ~ 1 + leg_left + leg_right,
+  prior = c(
+    prior(normal(75, 50), class = Intercept),
+    prior(normal(2, 10), class = b),
+    prior(exponential(1), class = sigma)
+  ),
+  iter = 2000, warmup = 1000, chains = 4, cores = 4
+)
+b6.1 <- update(b6.1, newdata = c)
+
+mcmc_plot(b6.1)
+```
+
+A multiple regression answers the question: What is the value of knowing one predictor, after already knowing all the other predictors? What is the value of knowing left leg length, after already knowing the right leg length in predicting height?
+
+Posterior distribution is looking at every possible combination of parameters and assigning relative plausibilities to each combination, in light of the model and the data. 
+
+
+```{r}
+post <- as_draws_df(b6.1)
+post %>% 
+  ggplot(aes(x = b_leg_left + b_leg_right)) + 
+  geom_density(alpha = 0.5)
+
+```
+
+# Post treatment bias.
+
+Let's simulate the data for our plant experiment. 
+
+```{r}
+N <- 100 # 100 plants
+
+d <- tibble(
+  h0 = rnorm(N, 10, 2),
+  treatment = rep(0:1, each = N/2),
+  fungus = rbinom(N, size = 1, prob = 0.5 - treatment * 0.4), #treatmend reduces fungal incidence
+  h1 = h0 + rnorm(N, 5 - 3 * fungus), # fungus incidence reduces height. 
+  
+)
+
+d %>% pivot_longer(everything()) %>% 
+  group_by(name) %>% 
+  tidybayes::mean_qi(.width = .89)
+```
+
+
+Modelling height in period 1 h1,i as a proportion of height in period 0 = h0,i * p.
+I'd assume p to be greater than 1, but it maybe less than 1 but surely not less than 0. 
+
+Using log-normal distribution.
+
+```{r}
+tidybayes::mean_qi(rlnorm(N, 0, 0.25))
+
+#Let's fit this model.
+
+b6.6 <- brm(
+  data = d,
+  family = gaussian,
+  h1 ~ 0 + h0,
+  prior = c(
+    prior(lognormal(0, 0.25), class = b, lb = 0),
+    prior(exponential(1), class = sigma)
+  ),
+  
+  iter = 2000, warmup = 1000, chains = 4, cores = 4
+)
+
+```
+
+
+Now let's model the proportion (p) as well, as a function of treatment as well as fungus. 
+
+```{r}
+b6.7 <- brm(
+  data = d,
+  family = gaussian,
+  bf(h1 ~ h0 * (a + t * treatment + f * fungus),
+     a + t + f ~ 1,
+     nl = T),
+  prior = c(
+    prior(lognormal(0, 0.25), nlpar = a, lb = 0),
+    prior(normal(0, 0.5), nlpar = t),
+    prior(normal(0, 0.5), nlpar = f),
+    prior(exponential(1), class = sigma)
+  ),
+  
+  iter = 2000, warmup = 1000, chains = 4, cores = 8
+)
+```
+
+The reason treatment effect is shown to be 0 is that fungus is a consequence of treatment. If I know the level of fungus, there is little to no benefit of knowing the treatment. A neat little conceptual understanding that comes from this is that given beta_t is 0, it means that treatment worked for the intendend reasons, which is good. 
+
+Let's write the correct model.
+
+```{r}
+b6.8 <- brm(
+  data = d,
+  family = gaussian,
+  bf(h1 ~ h0 * (a + t * treatment),
+     a + t ~ 1,
+     nl = T),
+  prior = c(
+    prior(lognormal(0, 0.25), nlpar = a, lb = 0),
+    prior(normal(0, 0.5), nlpar = t),
+    prior(exponential(1), class = sigma)
+  ),
+  
+  iter = 2000, warmup = 1000, chains = 4, cores = 8
+)
+
+```
+
+# Collider Bias DAGS.
+
+```{r}
+# Practicing DAG making.
+
+dag_coords <- tibble(
+  name = c("T", "S", "N"),
+  x = 1:3,
+  y = 1
+)
+
+dagify(S ~ T + N, 
+       coords = dag_coords)
+```
+
+When you condition on a collider, it creates statistical -- but not necessarily casual -- associations among its causes. 
+
+Let's try and make McElreath's sim_happiness function.
+First let's make a function newborn, that simulated 20 newborn 1 yearolds with uniformly distributed happiness.
+
+```{r}
+new_borns <- function(n = 20){
+  tibble(
+    a = 1, # age = 1
+    m = 0, # married = 0,
+    h = seq(-2,2, length.out = 20) # uniformly distributed happiness scores.
+  )
+}
+
+#Let's now update this starting population.
+update_population <- function(pop, n_births = 20, aom = 18, max_age = 65){
+  
+  pop %>% 
+    mutate(
+      a = a + 1, #increase the age,
+      m = ifelse(m>=1, 1, (a>=aom) * rbinom(n(), 1, rethinking::inv_logit(h-4)))
+    ) %>% 
+    filter(a <= max_age) %>% 
+    bind_rows(new_borns(n_births))
+    
+}
+
+
+```
+
+Let us now run this simulation for a 1000 years .
+
+```{r}
+set.seed(1977)
+
+d <- new_borns(n = 20) # the first year.
+
+#From year 2 to year 1000
+for (i in 2 : 1e3){
+  d <- update_population(d, n_birth = 20, aom = 18, max_age = 65)
+}
+
+#renaming variables:
+d <- d %>% rename(
+  age = a, happiness = h, married = m
+)
+
+```
+
+Let's look at this data.
+
+```{r}
+d %>% pivot_longer(everything()) %>% 
+  group_by(name) %>% 
+  tidybayes::mean_qi(value) %>% 
+  mutate_if(is.double, round, digits = 2)
+
+#Let's try to make this graph all by myself.
+
+d %>% 
+  mutate(married = factor(married, labels = c("unmarried","married"))) %>% 
+  ggplot(aes(x = age, y = happiness, color = married))+
+  geom_point(size = 1.75)+
+  scale_color_manual(NULL, values = c("grey85", "forestgreen"))
+  
+```
+
+
+
+```{r}
+d2 <- d %>% 
+  filter(age > 17) %>% 
+  mutate(a = (age - 18)/(65-18))
+
+d2 <- d2 %>% mutate(
+  mid = factor(married + 1, labels = c("single", "married"))
+)
+
+# Let's now fit the model.
+
+b6.9 <- brm(
+  data = d2, 
+  family = gaussian,
+  happiness ~ 0 + mid + a,
+  prior = c(
+    prior(normal(0,1), class = b, coef = midmarried),
+    prior(normal(0,1), class = b, coef = midsingle),
+    prior(normal(0,2), class = b, coef = a),
+    prior(exponential(1), class = sigma)
+  ),
+  
+  iter = 2e3, warmup = 1e3, chains = 4, cores = 8,
+  file = "brms_code/fits"
+)
+
+print(b6.9)
+
+
+b6.10 <- brm(
+  data = d2, 
+  family = gaussian,
+  happiness ~ 0 + Intercept + a,
+  prior = c(
+    prior(normal(0,1), class = b, coef = Intercept),
+    prior(normal(0,2), class = b, coef = a),
+    prior(exponential(1), class = sigma)
+  ),
+  
+  iter = 2e3, warmup = 1e3, chains = 4, cores = 8,
+  file = "brms_code/fits/b06.10"
+)
+
+
+# What if I donot include marriage status in the model.
+```
+
+Conditioning on a variable is looking within the sub populations of it.
+
+
+# Collider Bias (Children and their Grandparents)
+
+```{r}
+N <- 200 # 200 triads of G, P, C
+b_GP <- 1 # direct effect of Grandparents education on Parent's education.
+
+b_GC <- 0
+b_PC <- 1
+b_U <- 2
+
+d <- tibble(
+  U = 2 * rbinom(N, size = 1, prob = 0.5) - 1,
+  G = rnorm(N)
+) %>% 
+  mutate(
+    P = rnorm(N, b_GP * G + b_U * U),
+    C = rnorm(N, b_GC * G + b_U * U + b_PC * P)
+  )
+
+
+```
+
+Let's now run the collider bias model, including P to look at the direct effect of Grandparent's education on a child's education.
+
+```{r}
+b6.11 <- brm(
+  data = d,
+  family = gaussian,
+  C ~  Intercept +  P + G,
+  prior = c(
+    prior(normal(0,1), class = Intercept),
+    prior(normal(0,1), class = b),
+    prior(exponential(1), class = sigma)
+  ),
+  
+  iter = 2000, warmup = 1000, chains = 4, cores = 8
+)
+
+b6.11 <- update(b6.11, newdata = d)
+print(b6.11)
+
+```
+
+
+With the unobserved confound U
+
+```{r}
+b6.12 <- update(b6.11, 
+                formula = C ~ 1 + P + G + U,
+                newdata =d)
+
+```
+
+Let me try and make the graph for the relationship between Child's and grandparent's education along with the parents education as control.
+
+```{r}
+d %>% 
+  mutate(centile = ifelse( P >= quantile(P, 0.45) &
+                           P <= quantile(P, 0.6), "a", "b" ),
+         U = factor(U)) %>% 
+  ggplot(aes(x = G, y = C))+
+  geom_point(aes(color = U, shape = centile))+
+  stat_smooth(data = . %>% filter(centile == "a"),
+              method = lm, se = F, color = "black", linewidth = 1/5)+
+  scale_color_manual(values = c("black", "lightblue"))+
+  scale_shape_manual(values = c(19, 1))
+```
+
+# Confronting Confounding:
+
+Definition of confounding: Any scenario where the association between X and Y is not as it would be, if we had experimentally determined the values of X. 
+
+Think of intervening on X. Suppose there's X <-- U -- > Y, then if we only look at this path, intervening on X doesn't lead to a change in Y, but we still see association between X and Y. This is a non-causal backdoor path between X and Y, it has an arrow entering X AND it connects X to Y. 
+
+Four building blocks of a DAG:
+
+I do understand the first one Fork quite well.
+Second one: X --> Z -- > Y. If I condition on Z, we block the path between X and Y. 
+
+I also do understand the collider.
+
+The fourth one is descendant: Conditioning a descendent does partially condition on its parent. 
+Descendants are common, because often we cannot measure a variable
+directly and instead have only some proxy for it.
+
+
+Let's play around with DAGs.
+
+```{r}
+# a function that makes dags in gg way.
+library(ggdag)
+library(dagitty)
+
+gg_simple_dag <- function(d) {
+  
+  d %>% 
+    ggplot(aes(x = x, y = y, xend = xend, yend = yend)) +
+    geom_dag_point(color = "steelblue", alpha = 1/2, size = 6.5) +
+    geom_dag_text(color = "black") +
+    geom_dag_edges() + 
+    theme_dag()
+  
+}
+
+# The waffle house example.
+
+dag_coords <- tibble(
+  name = c("A", "D", "M", "S", "W"),
+  x = c(1,3,2,1,3),
+  y = c(1,1,2,3,3)
+)
+
+dagify(
+  A ~ S,
+  D ~ A + M + W,
+  M ~ A + S,
+  W ~ S,
+  coords = dag_coords
+) %>% gg_simple_dag()
+
+# Looking at adjustment sets.
+
+dag_6.2 <- 
+  dagitty(
+    "dag {
+    A -> D
+    A -> M -> D
+    A <- S -> M
+    S -> W -> D
+    }"
+  )
+
+adjustmentSets(dag_6.2, exposure = "W", outcome = "D")
+impliedConditionalIndependencies(dag_6.2)
+```
+

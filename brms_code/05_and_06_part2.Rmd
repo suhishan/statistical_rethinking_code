@@ -1,0 +1,253 @@
+---
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+```{r}
+library(brms)
+library(ggrepel)
+library(tidyverse)
+
+
+theme_set(theme_bw() + 
+            theme(panel.grid = element_blank()))
+
+```
+
+# Masked relationships.
+
+Load the data.
+
+```{r}
+data(milk, package = "rethinking")
+d <- milk
+
+d <- d %>% 
+  drop_na()
+
+d <- d %>% 
+  mutate(
+     K = rethinking::standardize(kcal.per.g),
+      N = rethinking::standardize(neocortex.perc),
+      M = rethinking::standardize(log(mass))
+  )
+
+# There are some missing values in brain's neocortex of primates.
+
+
+```
+
+
+Let's now fit the model.
+
+```{r}
+b5.5_draft <- brm(
+  data = d,
+  family = gaussian,
+  K ~ 1 + N,
+  
+  prior = c(
+    prior(normal(0, 0.2), class = Intercept),
+    prior(normal(0, 0.5), class = b),
+    prior(exponential(1), class = sigma)
+  ),
+  sample_prior = T,
+  iter = 2000, warmup = 1000, chains = 4, cores = 4
+)
+
+
+```
+
+Plot the priors as well as the posterior.
+
+```{r}
+prior_draws(b5.5_draft) %>% 
+  slice_sample(n = 50) %>% 
+  rownames_to_column("draws") %>% 
+  expand_grid(n = c(-2,2)) %>% 
+  mutate(k = Intercept + b * n) %>% 
+  
+  ggplot() +
+  geom_line(aes(x = n, y = k, group = draws))
+
+fitted(b5.5_draft) %>% 
+  data.frame() %>% 
+  bind_cols(d) %>% 
+  
+  ggplot(aes(x = N, y = K))+
+  geom_point(shape = 1, size = 3) +
+  geom_smooth(aes(y = Estimate, ymin = Q2.5, ymax = Q97.5),
+              stat = "identity")
+```
+
+
+# The model with body neo-cortex level and female body mass.
+
+```{r}
+b5.7 <- brm(
+  data = d,
+  family = gaussian,
+  K ~ 1 + N + M,
+  
+  prior = c(
+    prior(normal(0, 0.2), class = Intercept),
+    prior(normal(0, 0.5), class = b),
+    prior(exponential(1), class = sigma)
+  ),
+  sample_prior = T,
+  iter = 2000, warmup = 1000, chains = 4, cores = 4
+)
+
+
+
+```
+
+
+Let's draw some counterfactual plots.
+
+I want to the see counterfactual (means) of K for when Neocortex is kept fixed and Body mass is changed.
+
+```{r}
+nd <- tibble(M= seq(-2, 2, length.out = 30),
+             N = 0)
+
+fitted(b5.7,
+       newdata = nd) %>% 
+  data.frame() %>% 
+  bind_cols(nd) %>% 
+  
+  ggplot(aes(x = M, y = Estimate))+
+  geom_smooth(aes(ymin = Q2.5, ymax = Q97.5),
+              stat = "identity")
+```
+
+
+Something to remember: One regression/associatio n can have multiple DAGs and a set of DAGs with the same conditional independencies is known as Markov equivalent. 
+
+#Categorical Variables.
+
+1. Let's look at the difference in average height for men and women from the Kalahari Data. 
+
+```{r}
+data(Howell1, package = "rethinking")
+d <- Howell1
+rm(Howell1)
+```
+
+If you look at the male (1/0), in our likelihood for mu = a + b_m * male, the average height for male is more uncertain, because it uses two parameters than for females. This is not ideal. A better solution is to use index variables, 1 for female and 2 for male and have just a_sex as a list of parameters. 
+
+First let's learn to plot how this 1/0 parametrization is uncertain.
+
+```{r}
+prior <- tibble(
+  mu_female = rnorm(1e4, 178, 20)
+) %>% mutate(
+  mu_male = mu_female + rnorm(1e4, 0, 10)
+)
+
+prior %>% 
+  pivot_longer(everything()) %>% 
+  ggplot(aes(x = value, fill = name, color = name))+
+  geom_density(alpha = 5/10)+
+  scale_fill_manual(NULL, values = c("firebrick4", "black"))+
+  scale_color_manual(NULL, values = c("firebrick4", "black"))+
+  scale_y_continuous(breaks = NULL)
+  
+
+```
+
+Let's now use indexes:
+
+```{r}
+d <- d %>% mutate(sex = ifelse(male == 1, 2, 1))
+d <- d %>% mutate(sex = factor(sex))
+
+# Let's fit the model.
+
+b5.8 <- brm(
+  data = d, 
+  family = gaussian,
+  height ~ 0 + sex,
+
+  prior = c(
+    prior(normal(178, 20), class = b),
+    prior(uniform(0, 50), class = sigma, ub = 50)
+  ),
+  iter = 2000, warmup = 1000, chains = 4, cores = 4
+)
+
+b5.8 <- update(b5.8,
+               newdata = d)
+
+# Extract the samples (paramters samples) and compute a contrast.
+
+as_draws_df(b5.8) %>% 
+  mutate(diff_fm = b_sex1 - b_sex2) %>% 
+  pivot_longer(cols = c(b_sex1:sigma, diff_fm)) %>% 
+  group_by(name) %>% 
+  tidybayes::mean_qi(value, .width = .89)
+```
+
+# Many Categories.
+
+```{r}
+data(milk, package = "rethinking")
+m <- milk
+rm(milk)
+
+m %>% distinct(clade)
+#standardize kilocalorie.
+m <- m %>% 
+  mutate(k_std = (kcal.per.g - mean(kcal.per.g))/sd(kcal.per.g))
+
+
+```
+
+Let's now fit the model for each type of ape.
+
+```{r}
+b5.9 <- brm(
+  data = m,
+  family = gaussian,
+  k_std ~ 0 + clade, 
+  
+  prior = c(
+    prior(normal(0, 0.5), class = b),
+    prior(exponential(1), class = sigma)
+  ),
+  iter = 2000, warmup = 1000, chains = 4, cores = 4
+)
+
+mcmc_plot(b5.9, variable = "^b_", regex = TRUE)
+```
+
+Let's make harry potter categories and include that in the model. 
+
+```{r}
+house <- c("Gryffindor", "Hufflepuff", "Ravenclaw", "Slytherin")
+
+
+m <- m %>% 
+  mutate(
+    house = sample(rep(house, each = 8), size = n())
+  )
+
+# We use non-linear syntax for this. 
+
+b5.10 <- brm(
+  data = m, 
+  family = gaussian, 
+  bf(k_std ~ 0 + a + h,
+     a ~ 0 + clade,
+     h ~ 0 + house,
+     nl = T),
+  prior = c(
+    prior(normal(0, 0.5), nlpar = a),
+    prior(normal(0, 0.5), nlpar = h),
+    prior(exponential(1), class = sigma)
+  ),
+  iter = 2000, warmup = 1000, chains = 4, cores = 4,
+  file = "brms_code/fits/b05.10"
+)
+```
+

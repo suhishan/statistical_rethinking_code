@@ -1,0 +1,427 @@
+---
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+## Conditioning and Interaction:
+
+Most of our inference is conditional on how data came from the sampling process, the model that we choose, the variables that we use.
+
+Interaction is basically conditioning : identifying and measuring conditional associations. The relationship between x and y, or the effect of x on y is not independent but depends upon some other variable z, i.e. is conditional on z. 
+
+### Building Interactions: The African Continent Sample :
+```{r}
+library(brms)
+library(tidyverse)
+library(ggthemes)
+
+#theme planter and plander color schemes.
+theme_set(
+  theme_pander() +
+    theme(text = element_text(family = "Times"),
+          panel.background = element_rect(color = "black")) 
+)
+```
+
+```{r}
+data(rugged, package = "rethinking")
+d <- rugged
+
+rm(rugged)
+```
+
+
+Now let's standardize the variables.
+
+```{r}
+d <- d %>% mutate(
+  log_gdp = log(rgdppc_2000)
+)
+
+dd <- d %>% filter(complete.cases(rgdppc_2000))
+
+# Now standardize
+dd <- dd %>% 
+  mutate(
+    log_gdp_std = log_gdp / mean(log_gdp),
+    rugged_std = rugged / max(rugged)
+  )
+```
+
+
+The relationship that we want to look at is between ruggedness and log gdp. Every row of the dataset is a country. 
+
+```{r}
+mean(dd$rugged_std)
+
+# Mean Centralized rugged_std for the model. 
+dd <- dd %>% mutate(
+  rugged_std_c = rugged_std - mean(rugged_std)
+)
+```
+
+The average ruggedness is quite low: only 0.215.
+
+Let's fit a simple linear model and see the priors as well.
+
+```{r}
+b8.1 <- brm(
+  data = dd,
+  family = gaussian,
+  log_gdp_std ~ 1 + rugged_std_c,
+  # really flat priors:
+  prior = c(
+    prior(normal(1, 1), class = Intercept),
+    prior(normal(0, 1), class = b),
+    prior(exponential(1), class = sigma)
+  ),
+  sample_prior = T,
+  iter = 2000, warmup = 1000, chains = 4, cores = 8
+)
+
+
+```
+
+Let's plot the priors.
+
+```{r}
+prior_draws(b8.1) %>% 
+  slice_sample(n = 50) %>% 
+  rownames_to_column() %>% 
+  expand_grid(rugged_std_c = c(-2,2)) %>% 
+  mutate(log_gdp_std = Intercept + b * rugged_std_c,
+         rugged_std = rugged_std_c + mean(dd$rugged_std)) %>% 
+  
+  ggplot(aes(x = rugged_std, y = log_gdp_std, group = rowname))+
+  geom_line(color = palette_pander(n=2)[2], alpha = .4) +
+  geom_hline(yintercept = range(dd$log_gdp_std), linetype = 2)+
+  coord_cartesian(xlim = c(0,1),
+                  ylim = c(0.5, 1.5))
+
+# this shows impossible relationships. 
+```
+
+
+A model with better priors.
+
+```{r}
+b8.1b <- brm(
+  data = dd,
+  family = gaussian,
+  log_gdp_std ~ 1 + rugged_std_c,
+  # really flat priors:
+  prior = c(
+    prior(normal(1, 0.1), class = Intercept),
+    prior(normal(0, 0.3), class = b),
+    prior(exponential(1), class = sigma)
+  ),
+  sample_prior = T,
+  iter = 2000, warmup = 1000, chains = 4, cores = 8
+)
+
+```
+
+# Next, only the intercept changes model:
+
+```{r}
+dd <- dd %>% 
+  mutate(cid = ifelse(cont_africa == 1, "1", "2"))
+
+b8.2 <- brm(
+  data = dd,
+  family = gaussian,
+  log_gdp_std ~ 0 + cid + rugged_std_c,
+  prior = c(
+    prior(normal(1, 0.1), class = b, coef = cid1),
+    prior(normal(1, 0.1), class = b, coef = cid2),
+    prior(normal(0, 0.3), class = b, coef = rugged_std_c),
+    prior(exponential(1), class = sigma)
+  ),
+  iter = 2000, warmup = 1000, chains = 4, cores = 8
+)
+```
+
+The log GDP for African Nations seems lower than that for Non_African Nations. Let's compute the contrast and also, let's show their posterior distributions side by side.
+
+```{r}
+post_8.2 <- as_draws_df(b8.2) %>% 
+  data.frame()
+
+#Let's first plot these side by side.
+
+post_8.2 %>% 
+  select(starts_with("b_c")) %>% 
+  pivot_longer(everything()) %>% 
+  ggplot(aes(x = value, group = name))+
+  geom_density(aes(fill = name), alpha = 1/5)+
+  scale_fill_manual(values = c(
+    "b_cid1" = "red",
+    "b_cid2" = "blue"
+  ), labels = c("Africa","Rest of the World")) +
+  labs(fill = "",
+       x = "Log GDP as a proportion of mean")
+```
+
+The Log GDP do seem quite reliably different. Let's compute the contrast:
+
+```{r}
+contrast <- post_8.2 %>% 
+  mutate(diff = b_cid1 - b_cid2) %>% 
+  pull(diff)
+
+tidybayes::qi(contrast, .width = .89)
+```
+
+Let's draw the plot showing the different intercepts:
+
+```{r}
+nd <- crossing(
+  cid = 1:2,
+  rugged_std = seq(-0.2, 1.2, length.out = 30)
+) %>% 
+  mutate(rugged_std_c = rugged_std - mean(dd$rugged_std))
+
+# Now let's get all the fitted values for nd.
+f <- fitted(b8.2,
+            newdata = nd,
+            probs = c(0.015, 0.985)) %>% 
+  data.frame() %>% 
+  bind_cols(nd) %>% 
+  mutate(cont_africa = ifelse(cid == 1, "Africa", "Not Africa"))
+
+dd %>% mutate(cont_africa = ifelse(cid == 1, "Africa", "Not Africa")) %>%   ggplot(aes(x = rugged_std, fill = cont_africa, color = cont_africa))+
+  geom_point(aes(y = log_gdp_std), size = 3, shape = 1)+
+  geom_smooth(data = f,
+              aes(y = Estimate, ymin = Q1.5, ymax = Q98.5),
+              alpha = 1/4,
+              stat = "identity")+
+  coord_cartesian(xlim = c(0,1), ylim = c(0.7, 1.3))+
+  scale_fill_pander()+
+  scale_color_pander()+
+  labs(
+    subtitle = "Relationship between Land ruggedness and Log GDP",
+    x = "Ruggedness standardized from min to max",
+    y = "Log GDP as proportion of mean"
+  )+
+  theme(legend.title = element_blank())
+  
+```
+
+## Adding Interactions:
+
+The idea is, now the relationship between ruggedness and log_gdp is conditional on the continent. The aim is to see whether this relationship differs between countries that are from continent africa and countries that are outside Africa.
+
+```{r}
+b8.3 <- brm(
+  data = dd,
+  family = gaussian,
+  bf(log_gdp_std ~ 0 + a + b * rugged_std_c,
+     a ~ 0 + cid,
+     b ~ 0 + cid,
+     nl = T),
+  prior = c(
+     prior(normal(1, 0.1), class = b, coef = cid1, nlpar = a),
+     prior(normal(1, 0.1), class = b, coef = cid2, nlpar = a),
+     prior(normal(0, 0.3), class = b, coef = cid1, nlpar = b),
+     prior(normal(0, 0.3), class = b, coef = cid2, nlpar = b),
+     prior(exponential(1), class = sigma)),
+  iter = 2000, warmup = 1000, chains = 4, cores = 8,
+  fit = "brms_code/fits/b08.03"
+)
+```
+
+
+For Africa, the relationship between ruggedness and Log GDP is negative, while for Non African Nations, the relationship seems positive. 
+
+Let's plot the reversed slope in the same plot.
+
+```{r}
+f <- fitted(b8.3,
+            newdata = nd,
+            probs = c(0.015, 0.985)) %>% 
+  data.frame() %>% 
+  bind_cols(nd) %>% 
+  mutate(cont_africa = ifelse(cid == 1, "Africa", "Not Africa"))
+
+dd %>% mutate(cont_africa = ifelse(cid == 1, "Africa", "Not Africa")) %>%   ggplot(aes(x = rugged_std, fill = cont_africa, color = cont_africa))+
+  geom_point(aes(y = log_gdp_std), size = 3)+
+  geom_smooth(data = f,
+              aes(y = Estimate, ymin = Q1.5, ymax = Q98.5),
+              alpha = 1/4,
+              stat = "identity")+
+  coord_cartesian(xlim = c(0,1), ylim = c(0.7, 1.3))+
+  scale_fill_pander()+
+  scale_color_pander()+
+  labs(
+    subtitle = "Relationship between Land ruggedness and Log GDP",
+    x = "Ruggedness standardized from min to max",
+    y = "Log GDP as proportion of mean"
+  )+
+  theme(legend.title = element_blank())
+  
+
+```
+
+
+## Symmetry of Interactions:
+
+There is a symmetry to interactions. When we used interaction here, our interpretation was that the relationship between ruggedness and log GDP depends upon which continent a country is located in, Africa or Outside Africa.
+
+However, an equally plausible interpretation is that the relationship between a country being in a continent (here Africa vs. outside Africa) and its log GDP, depends upon its ruggedness. 
+
+Let's plot this second interpretation where we want to predict log GDP for cont_africa == 1 and cont_africa == 2 using ruggedness and see the difference at different ruggedness values i.e. keeping ruggedness constant.
+
+What this means is that suppose ruggedness is 0.4 of max ruggedness. In this constant value, what is the difference in log GDP of being in Africa than being outside of it. 
+
+```{r}
+f1 <- fitted(b8.3, 
+             newdata = tibble(
+               cid = 1,
+               rugged_std = seq(-0.2, 1.2, length.out = 30),
+               rugged_std_c = rugged_std - mean(dd$rugged_std)
+             ), summary = F)
+
+f2 <- fitted(b8.3, 
+             newdata = tibble(
+               cid = 2,
+               rugged_std = seq(-0.2, 1.2, length.out = 30),
+               rugged_std_c = rugged_std - mean(dd$rugged_std)
+             ), summary = F)
+
+delta <- f1 - f2
+
+delta %>% 
+  data.frame() %>% 
+  pivot_longer(everything()) %>% 
+  group_by(name) %>%
+  summarize(
+    Estimate = mean(value),
+    lci = quantile(value, probs = 0.015),
+    hci = quantile(value, probs = 0.985)
+  ) %>% 
+  bind_cols(rugged_std = seq(-0.2, 1.2, length.out = 30)) %>% 
+  ggplot(aes(x = rugged_std, y = Estimate))+
+  geom_smooth(stat = "identity",
+              aes(ymin = lci, ymax = hci), alpha = 1/4)
+  
+
+```
+
+
+
+### Now we move onto continuous interactions:
+
+```{r}
+data(tulips, package = "rethinking")
+d <- tulips
+rm(tulips)
+
+glimpse(d)
+```
+
+```{r}
+d <- d %>% mutate(
+  blooms_std = blooms / max(blooms),
+  water_cent = water - mean(water),
+  shade_cent = shade - mean(shade)
+)
+
+
+```
+
+
+# Let's now fit the model:
+
+```{r}
+b8.4 <- brm(
+  data = d,
+  family = gaussian,
+  blooms_std ~ 1 + water_cent + shade_cent,
+  prior = c(
+    prior(normal(0.5, 0.25), class = Intercept),
+    prior(normal(0, 0.25), class = b, coef = water_cent),
+    prior(normal(0, 0.25), class = b, coef = shade_cent),
+    prior(exponential(1), class = sigma)
+  ),
+  
+  iter = 2000, warmup = 1000, chains = 4, cores = 8,
+  seed = 8
+)
+
+posterior_summary(b8.4)
+
+
+```
+
+# The interaction model:
+
+
+```{r}
+b8.5 <- brm(
+  data = d,
+  family = gaussian,
+  blooms_std ~ 1 + water_cent + shade_cent + water_cent:shade_cent,
+  prior = c(
+    prior(normal(0.5, 0.25), class = Intercept),
+    prior(normal(0, 0.25), class = b, coef = water_cent),
+    prior(normal(0, 0.25), class = b, coef = shade_cent),
+    prior(normal(0, 0.25), class = b, coef = "water_cent:shade_cent"),
+    prior(exponential(1), class = sigma)
+  ),
+  
+  iter = 2000, warmup = 1000, chains = 4, cores = 8,
+  seed = 8
+)
+
+print(b8.5)
+```
+
+
+
+```{r}
+
+for (s in -1:1){
+nd <- tibble(
+  shade_cent = s,
+  water_cent = c(-1,1)
+)
+
+dt <- d[d$shade_cent == s,] %>% data.frame()
+
+f <- fitted(b8.5,
+       newdata = nd,
+       summary = F) %>% 
+  
+  data.frame() %>%
+  slice_sample(n = 20) %>% 
+  set_names("-1", "1") %>% 
+  rownames_to_column() %>% 
+  pivot_longer(-rowname,
+               names_to = "water_cent",
+               values_to = "blooms_std") %>% 
+  mutate(water_cent = as.double(water_cent))
+
+fig <- ggplot(data = dt, aes(x = water_cent, y = blooms_std))+
+  geom_line(data = f, aes(group = rowname))+
+  geom_point()+
+  coord_cartesian(xlim = c(-1,1))
+
+plot(fig)
+
+}
+  
+```
+
+
+# BRMS conditional effects:
+
+```{r}
+conditional_effects(b8.5,
+                    spaghetti = T)
+
+
+```
+
+
+
+

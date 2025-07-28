@@ -11,6 +11,7 @@ library(tidyverse)
 library(ggrepel)
 library(brms)
 
+
 theme_set(theme_bw() + 
             theme(panel.grid = element_blank()))
 data(WaffleDivorce, package = "rethinking")
@@ -361,7 +362,7 @@ predict(b5.3_A,
 
 ```
 
-Let's look at the causal effect of increasing the median age at marriage in a state from 20 years to 30 years.
+# (Identifying Causal Effects). Let's look at the causal effect of increasing the median age at marriage in a state from 20 years to 30 years.
 
 ```{r}
 nd <- tibble(a = (c(20, 30) - 26.1)/ 1.24,
@@ -375,6 +376,8 @@ predict(b5.3_A,
   set_names("a20", "a30") %>% 
   mutate(difference = a20 - a30) %>% 
   summarize(causal_effect = mean(difference))
+
+
 
 #
 ```
