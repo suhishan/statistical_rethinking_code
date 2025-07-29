@@ -1,0 +1,48 @@
+---
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+# Markov Chain Monte Carlooo
+
+```{r}
+library(tidyverse)
+library(brms)
+```
+
+The king visiting islands proportional to their population.
+
+```{r}
+num_weeks <- 1e5
+positions <- rep(0, num_weeks)
+current <- 7
+
+for (i in 1:num_weeks) {
+  # record my current position for plotting mainly.
+  positions[i] <- current
+  
+  # proposal island position
+  proposal <- current + sample(c(-1,1), size = 1)
+  
+  # loop around
+  if (proposal < 1) proposal <- 10
+  if (proposal > 10) proposal <- 1
+  
+  # move or not
+  prob_move <- proposal / current
+  current <- ifelse(runif(1) < prob_move, proposal, current)
+}
+
+plot(positions[1:100])
+plot(table(positions))
+```
+
+Important to keep this in mind for intuition:
+
+The “islands” in our objective are parameter values, and they need not be discrete, but can instead take on a continuous range of values as usual.
+
+The “population sizes” in our objective are the posterior probabilities at each parameter value.
+
+The “weeks” in our objective are samples taken from the joint posterior of the parameters in the model.
+
+A new fancy term to think about : Concentration of Meausre.
