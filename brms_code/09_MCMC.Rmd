@@ -8,6 +8,9 @@ editor_options:
 ```{r}
 library(tidyverse)
 library(brms)
+library(GGally)
+
+theme_set(theme_minimal())
 ```
 
 The king visiting islands proportional to their population.
@@ -45,4 +48,205 @@ The “population sizes” in our objective are the posterior probabilities at e
 
 The “weeks” in our objective are samples taken from the joint posterior of the parameters in the model.
 
-A new fancy term to think about : Concentration of Meausre.
+A new fancy term to think about : Concentration of Measure.
+
+### HMC baby (although we probably already did it before with brms)
+
+
+```{r}
+data(rugged, package = "rethinking")
+d <- rugged
+rm(rugged)
+```
+
+
+```{r}
+d <- d %>% mutate(log_gdp = log(rgdppc_2000))
+
+dd <- d %>% 
+  drop_na(rgdppc_2000) %>% 
+    mutate(
+  log_gdp_std = log_gdp / mean(log_gdp),
+  rugged_std = rugged / max(rugged),
+  cid = ifelse(cont_africa == 1, "1", "2")
+) %>% 
+  mutate(rugged_std_c = rugged_std - mean(rugged_std))
+```
+
+
+Let's fit the model:
+
+```{r}
+b9.1 <- brm(
+  data = dd,
+  family = gaussian,
+  
+  bf(log_gdp_std ~ 0 + a + b * (rugged_std_c - 0.215),
+     a ~ 0 + cid,
+     b ~ 0 + cid,
+     nl = T),
+  
+  prior = c(
+    prior(normal(1, 0.1), class = b, coef = cid1, nlpar = a),
+    prior(normal(1, 0.1), class = b, coef = cid2, nlpar = a),
+    prior(normal(0, 0.3), class = b, coef = cid1, nlpar = b),
+    prior(normal(0, 0.3), class = b, coef = cid2, nlpar = b),
+    prior(exponential(1), class = sigma)
+  ),
+  
+  iter = 2000, warmup = 1000, chains = 4, cores = 8,
+  file = "brms_code/fits/b09.01"
+)
+```
+
+
+Let's look at a pairs plot with correlation between posterior parameters.
+
+```{r}
+post <- as_draws_df(b9.1)
+
+post %>% 
+  select(b_a_cid1:sigma) %>% 
+  ggpairs() #requires GGally package which for some reason I can't find.
+```
+
+# Some diagnostics:
+
+```{r}
+plot(b9.1, widths = c(1, 2))
+print(b9.1)
+```
+
+
+When is Markov Chain Monte Carlo not providing us what we need?
+Number of effective samples: To see the number of independent samples from the posterior. (non-autocorrelated ones)
+
+R hat --> A measure of convergence : 1.0 is good but anything higher than 1 means the chains have not converged, we may need more samples. 
+
+Some Diagnostic Plots with the bayesplot package:
+
+```{r}
+library(bayesplot)
+
+#without bayesplot, directly from brms
+plot(b9.1)
+
+#using bayesplot:
+as_draws_df(b9.1) %>% 
+  mcmc_trace(pars = vars(b_a_cid1:sigma))
+
+as_draws_df(b9.1) %>% 
+  mcmc_acf(pars = vars(b_a_cid1:sigma), lags = 5)
+
+```
+
+To also see warmup chains, see Chapter 9 on the brms book, and using package `library(ggmcmc)
+
+```{r}
+# Rank plots:
+as_draws_df(b9.1) %>% 
+  mcmc_rank_overlay(pars = vars(b_a_cid1:sigma))
+
+```
+
+Extracting the Stan Model:
+
+```{r}
+b9.1$fit@stanmodel
+```
+
+
+## thinking of divergent transitions
+
+If there are really flat regions in the posterior, it's hard for the algorithm to sample.
+
+For eg:
+
+```{r}
+y <- c(-1,1)
+
+b9.2 <- brm(
+  data = list(y = c(-1,1)),
+  family = gaussian,
+  y ~ 1,
+  
+  prior = c(
+    prior(normal(0, 1000), class = Intercept),
+    prior(exponential(0.001), class = sigma)
+  ),
+  
+  iter = 2000, warmup = 1000, chains = 4, cores = 4,
+  seed = 9
+)
+```
+
+Detecting the divergent transitions and some code to help with this:
+
+```{r}
+# How many were divergent?
+nuts_params(b9.2) %>% 
+  filter(Parameter == "divergent__") %>% 
+  count(Value)
+
+pairs(b9.2, np = nuts_params(b9.2))
+
+# Looking at unhealthy chains
+plot(b9.2)
+```
+
+A better model with more informative priors:
+
+```{r}
+b9.3 <- brm(
+  data = list(y = c(-1,1)),
+  family = gaussian,
+  y ~ 1,
+  
+  prior = c(
+    prior(normal(1, 10), class = Intercept),
+    prior(exponential(1), class = sigma)
+  ),
+  
+  iter = 2000, warmup = 1000, chains = 4, cores = 4,
+  seed = 9
+)
+
+```
+
+Let's see the comparison between the priors and the estimates.
+
+```{r}
+as_draws_df(b9.3) %>% 
+  select(b_Intercept) %>% 
+  ggplot(aes(x = b_Intercept))+
+  geom_density(fill = "white")+
+  geom_line(data = tibble(x = seq(-15, 15, length.out = 50)),
+            aes(x = x, y = dnorm(x, mean = 0, sd = 10)),
+            linetype = 2)
+```
+
+
+
+## Non-identifianble parameters and how these markov chains will take longer:
+
+```{r}
+set.seed(41)
+y <- rnorm(100, 0, 1)
+
+
+# Running a model that identifies the sum of the Gaussian y's mu, but not mu.
+
+b9.4 <- brm(
+  family = gaussian,
+  data = list(y = y, a1 = 1, a2 = 1),
+  y ~ 0 + a1 + a2,
+  prior = c(
+    prior(normal(0, 10000), class = b),
+    prior(exponential(1), class = sigma)
+  ),
+  
+  iter = 1000, warmup = 500, chains = 4, cores = 4
+)
+
+```
+
