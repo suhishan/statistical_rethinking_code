@@ -1,0 +1,29 @@
+```{r}
+library(tidyverse)
+library(brms)
+```
+
+Entropy : Events that can happen vastly more ways are more likely.
+
+Good quote:
+
+"The principle of maximum entropy helps us choose likelihood functions, by providing a way to use stated assumptions about constraints on the outcome variable to choose the likelihood function that is the most conservative distribution compatible with the known constraints."
+
+The Maximum Entropy Principle:
+
+"The distribution that can happen the most ways is also the distribution with the biggest information entropy. The distribution with the biggest entropy is the most conservative distribution that obeys its constraints."
+
+
+Maximum Entropy Distribution: The distribution that can happen the greatest number of ways. 
+
+If all I know about a distribution is its variance, or that it is finite then: Gaussian has the largest entropy of any distribution with a given variance.
+
+
+"When only two un-ordered outcomes are possible—such as blue and white marbles—and the expected numbers of each type of event are assumed to be constant, then the distribution that is most consistent with these constraints is the binomial distribution. This distribution spreads probability out as evenly and conservatively as possible."
+
+
+For reference on different outcome distributions and their constraints, see page 314. 
+
+## Generalized Linear Models.
+
+Using outcome distributions that are other than the normal distribution, which have different parameters, but these parameters are a linear function of one or more predictor variables. However, some parameters, like p_i in a binomial distribution have the parameter space of [0,1], but if it is written as a function of predictors, it can go all over the place. So there must be a way to constraint it. That's where logit comes in, which maps the linear model onto p_i's [0,1]. 
