@@ -8,6 +8,13 @@ library(brms)
 library(tidyverse)
 
 library(wesanderson)
+
+theme_set(
+  theme_minimal() + 
+    theme(
+      panel.grid = element_blank()
+    )
+)
 ```
 
 Something to keep in mind:
@@ -123,6 +130,9 @@ We should expect high positive magnitude.
 
 # Model pulled_left with one intercept and variations in treatment:
 
+This verbose approach is only required if we want separate columns for each treatment values.
+
+
 ```{r}
 b11.3 <- brm(
   data = d,
@@ -146,13 +156,36 @@ b11.3 <- brm(
 
 ```
 
+Non Verbose Approach:
+
+```{r}
+b11.3a <- brm(
+  data = d,
+  family = binomial(),
+  bf(pulled_left | trials(1) ~ a + b,
+     a ~ 1,
+     b ~ 0 + treatment, 
+     nl = T),
+  
+  prior = c(
+    prior(normal(0, 1.5), nlpar = a),
+    prior(normal(0, 0.5), nlpar = b)
+  ),
+  
+  iter = 2e3, warmup = 1e3, cores = 4, chains = 4,
+  file = "brms_code/fits/b11.03a"
+)
+```
+
+
 # Among left-handers, what's the difference between no partner and partner?
 
 ```{r}
 as_draws_df(b11.3) %>% 
   mutate(diff24 = b_b_treatment2 - b_b_treatment4) %>% 
   ggplot(aes(x = diff24))+
-  geom_density()
+  geom_density(fill = "skyblue")+
+  geom_vline(xintercept = 0, linetype = 2)
 ```
 
 The answer is not a lot.
@@ -208,5 +241,70 @@ post %>% mutate(
   stat_pointinterval(.width = .95, linewidth = .5)+
   geom_vline(xintercept = 0, linetype = 2)
 ```
+
+
+### Relative change in odds.
+
+I want to know the change in odds of pulling the left lever if I go from treatment 2 (left handed: no partner) to treatment 4 (left handed: a partner)
+
+```{r}
+post %>% 
+  mutate(proportional_odds = exp(b_b_treatment4 - b_b_treatment2)) %>% 
+  mean_qi(proportional_odds)
+```
+
+The answer is 0.931 i.e. the odds of pulling the left lever decrease by 8%.
+
+### Using condensed binomial counts.
+
+```{r}
+d <- d %>% mutate(
+  side = factor(prosoc_left + 1), # right is 1, left is 2
+  cond = factor(condition + 1 ) # no partner is 1, partner is 2
+)
+```
+
+Aggregating the data.
+
+```{r}
+d_aggregate <- d %>% 
+  group_by(treatment, actor, side, cond) %>% 
+  summarize(left_pulls = sum(pulled_left))
+
+```
+
+The aggregated model:
+
+```{r}
+b11.6 <- brm(
+  data = d_aggregate,
+  family = binomial,
+  bf(left_pulls | trials(18) ~ a + b,
+     a ~ 0 + actor,
+     b ~ 0 + treatment,
+     nl  = T),
+  prior = c(
+    prior(normal(0, 1.5), nlpar = a),
+    prior(normal(0, 0.5), nlpar = b)
+  ),
+  
+  iter = 2e3, warmup = 1e3, chains = 4, cores = 4,
+  sample_prior = T,
+  file = "brms_code/fits/b11.06"
+)
+```
+
+Practising drawing coefficient plots.
+
+```{r}
+as_draws_df(b11.6) %>% 
+  select(contains("treatment")) %>% 
+  pivot_longer(everything()) %>% 
+  mutate(treatment = str_remove(name, "b_b_treatment"),
+         probability = inv_logit_scaled(value)) %>% 
+  ggplot(aes(x = probability, y = treatment))+
+  stat_pointinterval(.width = 95, linewidth = 1)
+```
+
 
 

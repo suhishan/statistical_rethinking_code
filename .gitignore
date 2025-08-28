@@ -2,3 +2,10 @@
 .Rhistory
 .RData
 .Ruserdata
+
+brms_manual.pdf
+
+# Folders to be ignored:
+
+brms_code/fits/
+Documents/
