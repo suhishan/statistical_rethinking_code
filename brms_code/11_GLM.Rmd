@@ -1,0 +1,212 @@
+---
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+```{r}
+library(brms)
+library(tidyverse)
+
+library(wesanderson)
+```
+
+Something to keep in mind:
+
+The essential problem is this: When what we wish to predict is a count, the scale of the parameters is never the same as the scale of the
+outcome.
+
+
+## Pro and Anti-Social Chimpanzees.
+
+```{r}
+data(chimpanzees, package = "rethinking")
+d <- chimpanzees
+rm(chimpanzees)
+
+glimpse(d)
+```
+
+
+The Index Variable approach:
+
+
+```{r}
+d <- d %>% mutate(
+  treatment = factor(1 + prosoc_left + 2 * condition)
+) %>% mutate(
+  labels = factor(treatment,
+                  levels = 1:4,
+                  labels = c("r/n", "l/n", "r/p", "l/p"))
+)
+# Just looking at general summary:
+d %>% group_by(treatment) %>% summarize(mean(pulled_left))
+```
+
+
+Let's fit an intercept only model and compare priors:
+Important bit on thinking about priors for logit link models:
+
+A flat prior in the logit space is not a flat prior in the outcome probability space.
+
+```{r}
+b11.1 <- brm(
+  data = d,
+  family = binomial,
+  pulled_left | trials(1) ~ 1,
+  
+  prior = c(
+    prior(normal(0, 10), class = Intercept)
+  ),
+  iter = 2000, warmup = 1000, chains = 4, cores = 4,
+  sample_prior = T,
+)
+```
+
+A much more sensible prior:
+
+```{r}
+b11.1b <- brm(
+  data = d,
+  family = binomial,
+  pulled_left | trials(1) ~ 1,
+  
+  prior = c(
+    prior(normal(0, 1.5), class = Intercept)
+  ),
+  iter = 2000, warmup = 1000, chains = 4, cores = 4,
+  sample_prior = T,
+)
+
+```
+
+
+The prior for p_i which is equal to exp(a)/ 1 + exp(a) looks something like this.
+
+```{r}
+curve(exp(x)/ (1 + exp(x)), from = -4, to = 4)
+```
+
+Let's compare the priors.
+
+```{r}
+bind_rows(
+  prior_draws(b11.1),
+  prior_draws(b11.1b)
+) %>% 
+  mutate(p = inv_logit_scaled(Intercept),
+         w = factor( rep(c(10, 1.5), each = n()/2), levels = c(10, 1.5))
+         ) %>% 
+  ggplot(aes(x = p, fill = w))+
+  geom_density(alpha = 0.3, adjust = 0.1)+
+  scale_fill_manual(
+    values = c("10" = "red", "1.5" = "yellow")
+  )
+
+
+```
+
+Some todos from brms and tidyverse:
+[] Model pulled_left with only varitions in treatment
+[] Model pulled_left including both actors and treatment, and see their coefficient plots.
+[] Computing and Understanding the differences:
+
+For left hand side
+No partner - Partner = Expectation is (low odds - high odds) of pulling left lever. We should expect high magnitude negative.
+
+
+For Right hand side
+No partner - Partner = Expectation is (high odds - low odds) of pulling left lever
+                     = Expectations is (low odds - high odds) of pulling right lever
+                     
+We should expect high positive magnitude. 
+
+
+# Model pulled_left with one intercept and variations in treatment:
+
+```{r}
+b11.3 <- brm(
+  data = d,
+  family = binomial,
+  bf(pulled_left | trials(1) ~ a + b,
+     a ~ 1,
+     b ~ 0 + treatment,
+     nl = T),
+  prior = c(
+    prior(normal(0, 1.5), nlpar = a),
+    prior(normal(0, 0.5), nlpar = b, coef = treatment1),
+    prior(normal(0, 0.5), nlpar = b, coef = treatment2),
+    prior(normal(0, 0.5), nlpar = b, coef = treatment3),
+    prior(normal(0, 0.5), nlpar = b, coef = treatment4)
+  ),
+  
+  iter = 2000, warmup = 1000, chains = 4, cores = 4,
+  file = "brms_code/fits/b11.03"
+)
+
+
+```
+
+# Among left-handers, what's the difference between no partner and partner?
+
+```{r}
+as_draws_df(b11.3) %>% 
+  mutate(diff24 = b_b_treatment2 - b_b_treatment4) %>% 
+  ggplot(aes(x = diff24))+
+  geom_density()
+```
+
+The answer is not a lot.
+
+# Incorporating the variation for individual monkeys as well:
+
+```{r}
+d <- d %>% mutate(actor = factor(actor))
+
+b11.4 <- brm(
+  data = d,
+  family = binomial,
+  bf(pulled_left | trials(1) ~ a + b,
+     a ~ 0 + actor,
+     b ~ 0 + treatment, 
+     nl = T),
+  prior = c(
+    prior(normal(0, 1.5), nlpar = a),
+    prior(normal(0, 0.5), nlpar = b)
+  ),
+  
+  iter = 2000, warmup = 1000, chains = 4, cores = 4,
+  file = "brms_code/fits/b11.04"
+)
+```
+
+# Let's make a coefficient plot for the treatment:
+
+```{r}
+library(tidybayes)
+
+post <- as_draws_df(b11.4); glimpse(post)
+
+post %>% 
+  pivot_longer(contains("treatment")) %>% 
+  mutate(probability = inv_logit_scaled(value),
+         treatment = str_remove(name, "b_b_treatment")) %>% 
+  ggplot(aes(x = probability, y = treatment))+
+  stat_pointinterval(.width = .95, linewidth = .5)
+```
+
+
+# Let's make a contrast coefficient plot for differences:
+
+```{r}
+post %>% mutate(
+  db13 = b_b_treatment1 - b_b_treatment3,
+  db24 = b_b_treatment2 - b_b_treatment4
+) %>% pivot_longer(db13:db24) %>% 
+  mutate(diffs = factor(name, levels = c("db24", "db13"))) %>% 
+  
+  ggplot(aes(x = value, y = diffs))+
+  stat_pointinterval(.width = .95, linewidth = .5)+
+  geom_vline(xintercept = 0, linetype = 2)
+```
+
+
